@@ -1,6 +1,6 @@
-\# 🎥 YouTube Monster Bot
+# 🎥 YouTube Monster Bot
 
-\# Ultimate Enterprise Edition 🚀
+# Ultimate Enterprise Edition 🚀
 
 
 
