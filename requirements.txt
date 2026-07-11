@@ -1,0 +1,5 @@
+telethon>=1.30.0
+yt-dlp[default]>=2025.1.1
+cryptg
+PySocks
+python-dotenv
