@@ -28,7 +28,6 @@ try:
     from telethon import TelegramClient, events, functions, types
     from telethon.tl.custom import Button
     from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
-    from telethon.errors import SessionPasswordNeededError
     import yt_dlp
     import socks
     from dotenv import load_dotenv, set_key
@@ -36,6 +35,16 @@ except ImportError as e:
     print(f"❌ Ошибка импорта: {e}. Пожалуйста, установите библиотеки:")
     print("pip install telethon yt-dlp[default] cryptg PySocks python-dotenv")
     sys.exit(1)
+
+# --- УМНЫЙ ПОИСК ФАЙЛА КОНФИГУРАЦИИ (обходит скрытые расширения и опечатки) ---
+if os.path.exists(".env"):
+    load_dotenv(".env")
+elif os.path.exists(".evn"):  # Автозащита от опечатки .evn
+    load_dotenv(".evn")
+elif os.path.exists(".env.txt"):
+    load_dotenv(".env.txt")
+else:
+    load_dotenv()
 
 # =====================================================================
 # КЛАСС 1: ПРОДВИНУТОЕ ЛОГИРОВАНИЕ
@@ -80,17 +89,19 @@ class BotConfig:
         self.PROXY_HOST = os.getenv("PROXY_HOST", "127.0.0.1")
         self.PROXY_PORT = int(os.getenv("PROXY_PORT", "10808"))
         
+        # Чтение белого списка доверенных премиум-пользователей
+        self.PREMIUM_USERS_RAW = os.getenv("PREMIUM_USERS", "")
+        self.PREMIUM_USERS = {int(x.strip()) for x in self.PREMIUM_USERS_RAW.split(",") if x.strip().isdigit()}
+        
         os.makedirs(self.DOWNLOAD_DIR, exist_ok=True)
         self._validate_keys()
 
     def _find_or_create_env(self):
-        """Интеллектуальный поиск файла конфигурации (защита от скрытых расширений Windows)"""
         possible_files = [".env", ".evn", ".env.txt"]
         for f in possible_files:
             if os.path.exists(f):
                 return f
         
-        # Если файла нет, генерируем идеальный шаблон
         logger.warning("Файл конфигурации не найден. Создаю новый .env файл...")
         template = (
             "API_ID=0\n"
@@ -98,6 +109,7 @@ class BotConfig:
             "BOT_TOKEN=\n"
             "DOWNLOAD_DIR=./downloads\n"
             "VIDEO_ENCODER=libx264\n"
+            "PREMIUM_USERS=\n"
             "USE_PROXY=False\n"
             "PROXY_HOST=127.0.0.1\n"
             "PROXY_PORT=10808\n"
@@ -112,7 +124,6 @@ class BotConfig:
             sys.exit(1)
 
     def update_key(self, key, value):
-        """Безопасное обновление ключа прямо в файле .env"""
         set_key(self.env_file, key, str(value))
         os.environ[key] = str(value)
         setattr(self, key, value)
@@ -144,12 +155,10 @@ class SQLiteDB:
         self.conn.commit()
 
     def register_user(self, user_id, username):
-        """Добавляет пользователя в базу при первом запуске /start"""
         self.cursor.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)', (user_id, username))
         self.conn.commit()
 
     def update_stats(self, user_id, size_mb):
-        """Обновляет счетчик скачанных мегабайт и видео для пользователя"""
         self.cursor.execute('''
             UPDATE users 
             SET total_videos = total_videos + 1, 
@@ -159,30 +168,26 @@ class SQLiteDB:
         self.conn.commit()
 
     def check_banned(self, user_id):
-        """Проверка, не находится ли пользователь в черном списке"""
         self.cursor.execute('SELECT is_banned FROM users WHERE user_id = ?', (user_id,))
         result = self.cursor.fetchone()
         return bool(result[0]) if result else False
 
     def set_ban_status(self, user_id, status: bool):
-        """Блокировка или разблокировка пользователя"""
         self.cursor.execute('UPDATE users SET is_banned = ? WHERE user_id = ?', (int(status), user_id))
         self.conn.commit()
         return self.cursor.rowcount > 0
 
     def get_all_users_ids(self):
-        """Получить список всех ID для массовой рассылки (Broadcast)"""
         self.cursor.execute('SELECT user_id FROM users WHERE is_banned = 0')
         return [row[0] for row in self.cursor.fetchall()]
 
     def get_global_statistics(self):
-        """Получить общую статистику для панели Администратора"""
         self.cursor.execute('SELECT COUNT(*), SUM(total_videos), SUM(total_mb_downloaded) FROM users')
         row = self.cursor.fetchone()
         return {
             "total_users": row[0] or 0,
             "total_videos": row[1] or 0,
-            "total_gb": (row[2] or 0) / 1024  # Конвертация МБ в ГБ
+            "total_gb": (row[2] or 0) / 1024  
         }
 
 db = SQLiteDB()
@@ -191,8 +196,6 @@ db = SQLiteDB()
 # КЛАСС 4: СИСТЕМНЫЕ УТИЛИТЫ И ПРОГРЕСС-БАРЫ
 # =====================================================================
 class Utils:
-    """Сборник статических методов для интерфейса и файловой системы"""
-    
     @staticmethod
     def format_bytes(size):
         if size is None or size <= 0: return "0.00 Б"
@@ -206,7 +209,6 @@ class Utils:
 
     @staticmethod
     def make_progress_bar(percent, length=12):
-        """Рисует красивый текстовый прогресс-бар [██████▒▒▒▒]"""
         filled = int(length * (percent / 100.0))
         bar = "█" * filled + "▒" * (length - filled)
         return f"[{bar}]"
@@ -223,7 +225,6 @@ class Utils:
 
     @staticmethod
     async def safe_remove(filepath, retries=5, delay=1.5):
-        """Безопасное удаление файлов с обходом блокировки дескрипторов Windows"""
         for _ in range(retries):
             try:
                 if os.path.exists(filepath):
@@ -242,12 +243,19 @@ class Utils:
 class YouTubeEngine:
     """Ядро скачивания, анализа кодеков и аппаратного транскодирования"""
     
-    # Умная сетка VBR битрейтов для идеального баланса веса и качества
     BITRATE_GRID = {
-        '1080': {'target': '3000k', 'max': '4500k'}, 
-        '720':  {'target': '1500k', 'max': '2500k'},  
+        '1080': {'target': '2800k', 'max': '4000k'}, 
+        '720':  {'target': '1500k', 'max': '2200k'},  
         '480':  {'target': '800k',  'max': '1200k'},   
         '360':  {'target': '450k',  'max': '700k'},    
+    }
+
+    # Сетка стабильного качества CQP для видеокарт AMD (AMF)
+    AMF_QP_GRID = {
+        '1080': '25',  
+        '720':  '28',   
+        '480':  '28',   
+        '360':  '30',   
     }
 
     @staticmethod
@@ -262,7 +270,6 @@ class YouTubeEngine:
 
     @staticmethod
     def probe_video(filepath):
-        """Глубокий анализ видеофайла: разрешение, длительность, кодеки"""
         try:
             cmd = ['ffprobe', '-v', 'error', '-show_entries', 'stream=width,height,duration,codec_name', '-of', 'json', filepath]
             res = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
@@ -286,13 +293,21 @@ class YouTubeEngine:
             logger.error(f"Ошибка FFprobe: {e}")
             return 0, 0, 0, '', ''
 
+    @staticmethod
+    def run_ffmpeg_checked(cmd, final_filename, user_id):
+        """Безопасный запуск FFmpeg с проверкой ошибок и размера файла"""
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
+        if result.returncode != 0 or not os.path.exists(final_filename) or os.path.getsize(final_filename) == 0:
+            stderr_text = result.stderr if result.stderr else "Нет вывода ошибок от FFmpeg."
+            logger.error(f"[{user_id}] Сбой FFmpeg (Код {result.returncode}): {stderr_text[-1000:]}")
+            return False, stderr_text
+        return True, ""
+
     @classmethod
     def download_and_optimize(cls, url, format_choice, video_id, user_id, duration, is_premium):
-        """Главный метод: скачивает с YouTube и оптимизирует файл под Telegram"""
         ffmpeg_exe = shutil.which('ffmpeg')
         ffmpeg_dir = os.path.dirname(ffmpeg_exe) if ffmpeg_exe else None
 
-        # Обработчик прогресса скачивания в консоль
         def ytdl_hook(d):
             if d['status'] == 'downloading':
                 d_bytes = d.get('downloaded_bytes') or 0
@@ -311,7 +326,6 @@ class YouTubeEngine:
             elif d['status'] == 'finished':
                 sys.stdout.write("\n")
 
-        # Конфигурация скачивателя
         opts = {
             'outtmpl': os.path.join(config.DOWNLOAD_DIR, f'{user_id}_{video_id}.%(ext)s'),
             'quiet': True, 'no_warnings': True, 'writethumbnail': True,
@@ -329,12 +343,10 @@ class YouTubeEngine:
             opts['merge_output_format'] = 'mp4'
             opts['postprocessors'] = [{'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'}]
 
-        # СКАЧИВАНИЕ
         logger.info(f"[{user_id}] Начинаем скачивание потока {format_choice}p...")
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
 
-        # ПОИСК СКАЧАННОГО ИСХОДНИКА
         if format_choice == 'mp3':
             final_file = os.path.join(config.DOWNLOAD_DIR, f"{user_id}_{video_id}.mp3")
             if not os.path.exists(final_file): final_file = cls._find_file(user_id, video_id)
@@ -348,37 +360,68 @@ class YouTubeEngine:
         w, h, dur, v_codec, a_codec = cls.probe_video(source_file)
         logger.info(f"[{user_id}] Исходник: {w}x{h} | Кодеки: Video={v_codec}, Audio={a_codec}")
 
-        # ЛОГИКА ТРАНСКОДИРОВАНИЯ И СЖАТИЯ
+        success = False
+        error_msg = ""
+
+        # СЦЕНАРИЙ 1: Потоки совместимы с MP4. Прямое копирование без перекодирования
         if v_codec == 'h264' and a_codec in ['aac', 'mp3']:
-            logger.info(f"[{user_id}] ⚡ Применяем Direct Copy (мгновенная упаковка без пережатия)")
-            subprocess.run(['ffmpeg', '-y', '-i', source_file, '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', final_file], capture_output=True)
+            logger.info(f"[{user_id}] ⚡ Применяем Direct Copy...")
+            cmd = ['ffmpeg', '-y', '-i', source_file, '-c:v', 'copy', '-c:a', 'copy', '-movflags', '+faststart', final_file]
+            success, error_msg = cls.run_ffmpeg_checked(cmd, final_file, user_id)
             
+        # СЦЕНАРИЙ 2: Видео H.264 совместимо, звук нет
         elif v_codec == 'h264':
-            logger.info(f"[{user_id}] ⚙️ Транскодируем только аудиодорожку в AAC")
-            subprocess.run(['ffmpeg', '-y', '-i', source_file, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', final_file], capture_output=True)
+            logger.info(f"[{user_id}] ⚙️ Конвертируем звук в AAC (видео без изменений)...")
+            cmd = ['ffmpeg', '-y', '-i', source_file, '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', final_file]
+            success, error_msg = cls.run_ffmpeg_checked(cmd, final_file, user_id)
             
+        # СЦЕНАРИЙ 3: Видео в VP9/AV1. Пережимаем в H.264. Попытка задействовать выбранный кодек.
         else:
-            logger.info(f"[{user_id}] 🏎️ Запуск полного транскодирования видео (Энкодер: {config.VIDEO_ENCODER})")
+            logger.info(f"[{user_id}] 🏎️ Запуск транскодирования видео (Энкодер: {config.VIDEO_ENCODER})")
             cfg = cls.BITRATE_GRID.get(str(format_choice), {'target': '2000k', 'max': '3000k'})
             
             cmd = ['ffmpeg', '-y', '-i', source_file, '-c:v', config.VIDEO_ENCODER]
             
-            if 'amf' in config.VIDEO_ENCODER:    # Аппаратный кодек AMD
-                cmd.extend(['-rc', 'vbr_peak', '-b:v', cfg['target'], '-maxrate', cfg['max']])
-            elif 'nvenc' in config.VIDEO_ENCODER: # Аппаратный кодек NVIDIA
+            if 'amf' in config.VIDEO_ENCODER:
+                qp_val = cls.AMF_QP_GRID.get(str(format_choice), '28')
+                cmd.extend(['-rc', 'cqp', '-qp_i', qp_val, '-qp_p', qp_val])
+            elif 'nvenc' in config.VIDEO_ENCODER:
                 cmd.extend(['-rc', 'vbr', '-b:v', cfg['target'], '-maxrate', cfg['max']])
-            elif 'qsv' in config.VIDEO_ENCODER:   # Аппаратный кодек Intel
+            elif 'qsv' in config.VIDEO_ENCODER:
                 cmd.extend(['-b:v', cfg['target'], '-maxrate', cfg['max']])
-            else:                                 # Программный кодек (CPU)
+            else:
                 est_bits = (int(cfg['max'].replace('k', '')) * 1024 + 128000) * duration
                 max_safe = (3900 if is_premium else 1900) * 1024 * 1024 * 8
                 crf = 28 if est_bits > max_safe else 18
                 cmd.extend(['-preset', 'veryfast', '-crf', str(crf), '-maxrate', cfg['max'], '-bufsize', f"{int(cfg['max'].replace('k', '')) * 2}k"])
             
+            # === ИСПРАВЛЕНИЕ ВЫЛЕТА ВИДЕОКАРТЫ (Конвертация 10-бит в 8-бит) ===
+            cmd.extend(['-pix_fmt', 'yuv420p'])
+            
             cmd.extend(['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', final_file])
-            subprocess.run(cmd, capture_output=True)
+            
+            # Безопасный запуск
+            res = subprocess.run(cmd, capture_output=True, text=True, errors='replace')
+            
+            # Если видеокарта упала - делаем автоматический откат на процессор
+            if res.returncode != 0 or not os.path.exists(final_file) or os.path.getsize(final_file) == 0:
+                logger.warning(f"[{user_id}] ⚠️ Кодек {config.VIDEO_ENCODER} упал. Откат на CPU. Ошибка: {res.stderr[-300:] if res.stderr else 'Unknown'}")
+                
+                if os.path.exists(final_file):
+                    try: os.remove(final_file)
+                    except: pass
+                
+                cpu_cmd = [
+                    'ffmpeg', '-y', '-i', source_file,
+                    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+                    '-maxrate', cfg['max'], '-bufsize', f"{int(cfg['max'].replace('k', '')) * 2}k",
+                    '-pix_fmt', 'yuv420p',
+                    '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', final_file
+                ]
+                res_cpu = subprocess.run(cpu_cmd, capture_output=True, text=True, errors='replace')
+                if res_cpu.returncode != 0:
+                    raise RuntimeError(f"FFmpeg (CPU) тоже упал: {res_cpu.stderr[-200:] if res_cpu.stderr else 'Unknown'}")
 
-        # Очистка исходника
         try: os.remove(source_file)
         except: pass
 
@@ -402,7 +445,6 @@ class YouTubeEngine:
                 break
         if raw_thumb:
             thumb_file = os.path.join(config.DOWNLOAD_DIR, f"{user_id}_{video_id}_thumb.jpg")
-            # Сжимаем под лимиты Telegram (<320px)
             subprocess.run(['ffmpeg', '-y', '-i', raw_thumb, '-vf', "scale='if(gt(iw,ih),320,-1)':'if(gt(iw,ih),-1,320)'", '-q:v', '5', thumb_file], capture_output=True)
             try: os.remove(raw_thumb)
             except: pass
@@ -438,7 +480,7 @@ class TelegramStreamUploader:
                     f.seek(part_index * chunk_size)
                     data = f.read(chunk_size)
                     
-                for attempt in range(4): # 4 попытки на случай сетевых сбоев
+                for attempt in range(4): 
                     try:
                         await client(functions.upload.SaveBigFilePartRequest(
                             file_id=file_id, file_part=part_index, file_total_parts=chunks_count, bytes=data
@@ -448,7 +490,7 @@ class TelegramStreamUploader:
                         if attempt == 3: logger.error(f"Сбой загрузки куска {part_index}: {e}")
                         await asyncio.sleep(1.5)
                         
-                del data # Жесткая очистка памяти
+                del data  
                 
                 async with u_lock:
                     uploaded += 1
@@ -578,7 +620,7 @@ class MonsterBotApp:
                     try:
                         await self.bot.send_message(uid, f"🔔 **Уведомление от Администратора:**\n\n{message}")
                         success_count += 1
-                        await asyncio.sleep(0.5) # Защита от флуд-контроля Telegram
+                        await asyncio.sleep(0.5) 
                     except Exception: pass
                     
                 await progress_msg.edit(f"✅ **Рассылка завершена!**\nУспешно доставлено: `{success_count} / {len(users)}`")
@@ -642,6 +684,7 @@ class MonsterBotApp:
         # 4. ОБРАБОТЧИК КЛИКОВ ПО КНОПКАМ КАЧЕСТВА
         @self.bot.on(events.CallbackQuery(pattern=b'^dl:'))
         async def download_callback(event):
+            global owner_id, bot_username, is_premium_user
             user_id = event.sender_id
             
             try:
@@ -663,11 +706,14 @@ class MonsterBotApp:
                 )
 
                 file_size_mb = os.path.getsize(final_filename) / (1024 * 1024)
-                max_limit_mb = 3950 if self.is_premium else 1950
+                
+                # Динамический лимит под Premium
+                has_premium_access = (user_id in config.PREMIUM_USERS) and self.is_premium
+                max_limit_mb = 3950 if has_premium_access else 1950
 
                 # Защита от переполнения лимитов Telegram
                 if file_size_mb > max_limit_mb:
-                    await msg.edit(f"❌ **Сбой:** Файл весит {file_size_mb:.1f} МБ. Ваш лимит отправки: {'4 ГБ' if self.is_premium else '2 ГБ'}.")
+                    await msg.edit(f"❌ **Сбой:** Файл весит {file_size_mb:.1f} МБ. Ваш лимит отправки: {'4 ГБ' if has_premium_access else '2 ГБ'}.")
                     await Utils.safe_remove(final_filename)
                     if thumb_file: await Utils.safe_remove(thumb_file)
                     return
@@ -747,6 +793,9 @@ class MonsterBotApp:
             user_me = await self.user.get_me()
             self.owner_id = user_me.id
             self.is_premium = getattr(user_me, 'premium', False)
+            
+            # Добавляем владельца в список Premium-пользователей по умолчанию
+            config.PREMIUM_USERS.add(self.owner_id)
             
             logger.info("🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!")
             logger.info(f"👑 Аккаунт владельца: {user_me.first_name} | Premium-статус: {'АКТИВЕН' if self.is_premium else 'ОТСУТСТВУЕТ'}")
@@ -838,7 +887,7 @@ def interactive_cli_menu():
         elif choice == "5":
             for f in ["user_session.session", "user_session.session-journal"]:
                 if os.path.exists(f): os.remove(f)
-            print("\n✅ Сессия успешно сброшена! Бот переведен в стандартный бесплатный режим (2 ГБ).")
+            print("\n✅ Сброс сессии выполнен успешно! Бот переведен в стандартный бесплатный режим (2 ГБ).")
             time.sleep(2)
         elif choice == "0":
             sys.exit(0)
@@ -862,13 +911,3 @@ if __name__ == "__main__":
             sys.exit(0)
         except SystemExit:
             os._exit(0)
-# =====================================================================
-# ТОЧКА ВХОДА (ENTRY POINT)
-# =====================================================================
-if __name__ == "__main__":
-    # Запускаем интерактивное консольное меню настройки перед стартом
-    enable_userbot = interactive_cli_menu()
-    
-    # Инициализация и запуск главного приложения
-    app = MonsterBotApp(enable_userbot)
-    asyncio.run(app.start())

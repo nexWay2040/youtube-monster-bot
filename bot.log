@@ -54,3 +54,428 @@
 23:47:32 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
 23:48:03 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
 23:48:03 - [INFO] - 👑 Аккаунт владельца: Sally | Premium-статус: ОТСУТСТВУЕТ
+01:35:09 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+01:35:10 - [INFO] - 🚀 БОТ УСПЕШНО ЗАПУЩЕН В СТАНДАРТНОМ РЕЖИМЕ!
+01:35:10 - [INFO] - ⚡ Максимальный лимит: 2 ГБ (Premium-юзербот отключен)
+01:35:24 - [INFO] - [6091569279] Начинаем скачивание потока 720p...
+01:35:53 - [INFO] - [6091569279] Исходник: 1280x720 | Кодеки: Video=av1, Audio=
+01:35:53 - [INFO] - [6091569279] 🏎️ Запуск полного транскодирования видео (Энкодер: h264_amf)
+01:41:12 - [INFO] - [6091569279] ✅ Видео (561.5 МБ) успешно доставлено пользователю.
+13:05:22 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+13:05:23 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+13:05:49 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+13:05:49 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+13:06:58 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+13:08:15 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+13:08:15 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+13:08:16 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+13:08:16 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+13:09:13 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+13:09:27 - [ERROR] - [7679018956] Критический сбой: [0;31mERROR:[0m [download] Got error: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 660, in download_callback
+    final_filename, thumb_file = await asyncio.to_thread(
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "C:\Users\bro20\miniconda3\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 335, in download_and_optimize
+    ydl.download([url])
+    ~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3715, in download
+    self.__download_wrapper(self.extract_info)(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        url, force_generic_extractor=self.params.get('force_generic_extractor', False))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3688, in wrapper
+    res = func(*args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1721, in extract_info
+    return self.__extract_info(url, self.get_info_extractor(key), download, extra_info, process)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1732, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1888, in __extract_info
+    return self.process_ie_result(ie_result, download, extra_info)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1947, in process_ie_result
+    ie_result = self.process_video_result(ie_result, download=download)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3135, in process_video_result
+    self.process_info(new_info)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 195, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3571, in process_info
+    partial_success, real_download = self.dl(fname, new_info)
+                                     ~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3324, in dl
+    return fd.download(name, new_info, subtitle)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 480, in download
+    ret = self.real_download(filename, info_dict)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\http.py", line 360, in real_download
+    for retry in RetryManager(self.params.get('retries'), self.report_retry):
+                 ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\utils\_utils.py", line 5300, in __iter__
+    self.error_callback(self.error, self.attempt, self.retries)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 413, in report_retry
+    RetryManager.report_retry(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        err, count, retries, info=self.__to_screen,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        sleep_func=self.params.get('retry_sleep_functions', {}).get(is_frag or 'http'),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        suffix=f'fragment{"s" if frag_index is None else f" {frag_index}"}' if is_frag else None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\utils\_utils.py", line 5307, in report_retry
+    return error(f'{e}. Giving up after {count - 1} retries') if count > 1 else error(str(e))
+                                                                                ~~~~~^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 416, in <lambda>
+    error=IDENTITY if not fatal else lambda e: self.report_error(f'\r[download] Got error: {e}'),
+                                               ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1166, in report_error
+    self.trouble(f'{self._format_err("ERROR:", self.Styles.ERROR)} {message}', *args, **kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1104, in trouble
+    raise DownloadError(message, exc_info)
+yt_dlp.utils.DownloadError: [0;31mERROR:[0m [download] Got error: ('Connection aborted.', ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+13:09:36 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+13:09:55 - [ERROR] - [7679018956] Критический сбой: [0;31mERROR:[0m Unable to rename file: [WinError 32] Процесс не может получить доступ к файлу, так как этот файл занят другим процессом: 'F:\\AppCaches\\7679018956_X1skT7REZFQ.f399.mp4.part' -> 'F:\\AppCaches\\7679018956_X1skT7REZFQ.f399.mp4'. Giving up after 3 retries
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 660, in download_callback
+    final_filename, thumb_file = await asyncio.to_thread(
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "C:\Users\bro20\miniconda3\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 335, in download_and_optimize
+    ydl.download([url])
+    ~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3715, in download
+    self.__download_wrapper(self.extract_info)(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        url, force_generic_extractor=self.params.get('force_generic_extractor', False))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3688, in wrapper
+    res = func(*args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1721, in extract_info
+    return self.__extract_info(url, self.get_info_extractor(key), download, extra_info, process)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1732, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1888, in __extract_info
+    return self.process_ie_result(ie_result, download, extra_info)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1947, in process_ie_result
+    ie_result = self.process_video_result(ie_result, download=download)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3135, in process_video_result
+    self.process_info(new_info)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 195, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3571, in process_info
+    partial_success, real_download = self.dl(fname, new_info)
+                                     ~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3324, in dl
+    return fd.download(name, new_info, subtitle)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 480, in download
+    ret = self.real_download(filename, info_dict)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\http.py", line 363, in real_download
+    return download()
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\http.py", line 343, in download
+    self.try_rename(ctx.tmpfilename, ctx.filename)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 241, in wrapper
+    for retry in RetryManager(self.params.get('file_access_retries', 3), error_callback, fd=self):
+                 ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\utils\_utils.py", line 5300, in __iter__
+    self.error_callback(self.error, self.attempt, self.retries)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 234, in error_callback
+    return RetryManager.report_retry(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        err, count, retries, info=fd.__to_screen,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        warn=lambda e: (time.sleep(0.01), fd.to_screen(f'[download] Unable to {action} file: {e}')),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        error=None if fatal else lambda e: fd.report_error(f'Unable to {action} file: {e}'),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        sleep_func=fd.params.get('retry_sleep_functions', {}).get('file_access'))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\utils\_utils.py", line 5307, in report_retry
+    return error(f'{e}. Giving up after {count - 1} retries') if count > 1 else error(str(e))
+           ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 237, in <lambda>
+    error=None if fatal else lambda e: fd.report_error(f'Unable to {action} file: {e}'),
+                                       ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1166, in report_error
+    self.trouble(f'{self._format_err("ERROR:", self.Styles.ERROR)} {message}', *args, **kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1104, in trouble
+    raise DownloadError(message, exc_info)
+yt_dlp.utils.DownloadError: [0;31mERROR:[0m Unable to rename file: [WinError 32] Процесс не может получить доступ к файлу, так как этот файл занят другим процессом: 'F:\\AppCaches\\7679018956_X1skT7REZFQ.f399.mp4.part' -> 'F:\\AppCaches\\7679018956_X1skT7REZFQ.f399.mp4'. Giving up after 3 retries
+13:10:27 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+13:10:28 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+13:10:28 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+13:10:28 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+13:10:34 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+13:11:09 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+13:11:09 - [INFO] - [7679018956] 🏎️ Запуск полного транскодирования видео (Энкодер: h264_amf)
+13:16:28 - [INFO] - [7679018956] ✅ Видео (776.0 МБ) успешно доставлено пользователю.
+13:16:39 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+13:17:23 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+13:17:23 - [INFO] - [7679018956] 🏎️ Запуск полного транскодирования видео (Энкодер: h264_amf)
+13:25:50 - [INFO] - [7679018956] ✅ Видео (1344.8 МБ) успешно доставлено пользователю.
+13:25:54 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+13:33:42 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+13:33:42 - [INFO] - [7679018956] 🏎️ Запуск полного транскодирования видео (Энкодер: h264_amf)
+13:33:43 - [ERROR] - [7679018956] Критический сбой: The length of a file part is invalid (caused by SendMediaRequest)
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 720, in download_callback
+    await sender.send_file(user_id, uploaded_file, caption=caption, thumb=thumb_file, attributes=attributes, supports_streaming=True)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\uploads.py", line 484, in send_file
+    return self._get_response_message(request, await self(request), entity)
+                                               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\users.py", line 30, in __call__
+    return await self._call(self._sender, request, ordered=ordered)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\users.py", line 92, in _call
+    result = await future
+             ^^^^^^^^^^^^
+telethon.errors.rpcerrorlist.FilePartLengthInvalidError: The length of a file part is invalid (caused by SendMediaRequest)
+13:34:08 - [INFO] - [7679018956] Начинаем скачивание потока 720p...
+13:38:17 - [INFO] - [7679018956] Исходник: 1280x720 | Кодеки: Video=av1, Audio=
+13:38:17 - [INFO] - [7679018956] 🏎️ Запуск полного транскодирования видео (Энкодер: h264_amf)
+13:38:18 - [ERROR] - [7679018956] Критический сбой: The length of a file part is invalid (caused by SendMediaRequest)
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 720, in download_callback
+    await sender.send_file(user_id, uploaded_file, caption=caption, thumb=thumb_file, attributes=attributes, supports_streaming=True)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\uploads.py", line 484, in send_file
+    return self._get_response_message(request, await self(request), entity)
+                                               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\users.py", line 30, in __call__
+    return await self._call(self._sender, request, ordered=ordered)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\users.py", line 92, in _call
+    result = await future
+             ^^^^^^^^^^^^
+telethon.errors.rpcerrorlist.FilePartLengthInvalidError: The length of a file part is invalid (caused by SendMediaRequest)
+13:41:33 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+13:41:34 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+13:41:35 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+13:41:35 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+13:41:54 - [INFO] - [7679018956] Начинаем скачивание потока 720p...
+13:45:37 - [INFO] - [7679018956] Исходник: 1280x720 | Кодеки: Video=av1, Audio=
+13:45:37 - [INFO] - [7679018956] 🏎️ Запуск полного транскодирования видео (Энкодер: h264_amf)
+13:45:38 - [ERROR] - [7679018956] Критический сбой: The length of a file part is invalid (caused by SendMediaRequest)
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 720, in download_callback
+    await sender.send_file(user_id, uploaded_file, caption=caption, thumb=thumb_file, attributes=attributes, supports_streaming=True)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\uploads.py", line 484, in send_file
+    return self._get_response_message(request, await self(request), entity)
+                                               ^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\users.py", line 30, in __call__
+    return await self._call(self._sender, request, ordered=ordered)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\telethon\client\users.py", line 92, in _call
+    result = await future
+             ^^^^^^^^^^^^
+telethon.errors.rpcerrorlist.FilePartLengthInvalidError: The length of a file part is invalid (caused by SendMediaRequest)
+13:53:24 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+13:53:25 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+13:53:26 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+13:53:26 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+13:53:37 - [INFO] - [7679018956] Начинаем скачивание потока 720p...
+13:59:15 - [INFO] - [7679018956] Исходник: 1280x720 | Кодеки: Video=av1, Audio=
+13:59:15 - [INFO] - [7679018956] Попытка аппаратного кодирования (Кодек=h264_amf)...
+13:59:15 - [ERROR] - [7679018956] Сбой FFmpeg (Код 3199971767): ng encoder - maybe incorrect parameters such as bit_rate, rate, width or height.
+[vf#0:0 @ 00000234b0350600] Error sending frames to consumers: Invalid data found when processing input
+[vf#0:0 @ 00000234b0350600] Task finished with error code: -1094995529 (Invalid data found when processing input)
+[vf#0:0 @ 00000234b0350600] Terminating thread with return code -1094995529 (Invalid data found when processing input)
+[vost#0:0/h264_amf @ 00000234ad1dcd80] [enc:h264_amf @ 00000234ad1b7e00] Could not open encoder before EOF
+[vost#0:0/h264_amf @ 00000234ad1dcd80] Task finished with error code: -22 (Invalid argument)
+[vost#0:0/h264_amf @ 00000234ad1dcd80] Terminating thread with return code -22 (Invalid argument)
+[out#0/mp4 @ 00000234ad1d7280] Nothing was written into output file, because at least one of its streams received no packets.
+frame=    0 fps=0.0 q=0.0 Lsize=       0KiB time=N/A bitrate=N/A speed=N/A elapsed=0:00:00.08    
+[aac @ 00000234ad222d80] Qavg: 65536.000
+Conversion failed!
+
+13:59:15 - [WARNING] - [7679018956] ⚠️ Аппаратный кодек h264_amf завершился со сбоем. Автопереход на CPU (libx264)...
+14:00:40 - [ERROR] - [7679018956] Сбой FFmpeg (Код 255): frames:  2.7%  4.3%  2.1% 90.8%
+[libx264 @ 000001c7f59b00c0] mb I  I16..4: 12.4% 43.1% 44.5%
+[libx264 @ 000001c7f59b00c0] mb P  I16..4:  1.3%  3.0%  0.2%  P16..4: 37.8% 10.3%  4.8%  0.0%  0.0%    skip:42.6%
+[libx264 @ 000001c7f59b00c0] mb B  I16..4:  0.0%  0.1%  0.0%  B16..8:  4.0%  0.5%  0.0%  direct: 0.4%  skip:95.0%  L0:38.2% L1:44.7% BI:17.2%
+[libx264 @ 000001c7f59b00c0] 8x8 transform intra:62.1% inter:47.5%
+[libx264 @ 000001c7f59b00c0] coded y,uvDC,uvAC intra: 54.4% 31.0% 9.3% inter: 5.4% 1.7% 0.1%
+[libx264 @ 000001c7f59b00c0] i16 v,h,dc,p: 37% 24% 17% 22%
+[libx264 @ 000001c7f59b00c0] i8 v,h,dc,ddl,ddr,vr,hd,vl,hu: 16% 25% 26%  3%  7%  4%  6%  6%  8%
+[libx264 @ 000001c7f59b00c0] i4 v,h,dc,ddl,ddr,vr,hd,vl,hu: 15% 19% 16%  4% 14%  7%  9%  6% 10%
+[libx264 @ 000001c7f59b00c0] i8c dc,h,v,p: 66% 18% 11%  5%
+[libx264 @ 000001c7f59b00c0] Weighted P-Frames: Y:5.9% UV:4.6%
+[libx264 @ 000001c7f59b00c0] kb/s:1994.22
+[aac @ 000001c7f27f01c0] Qavg: 699.371
+Exiting normally, received signal 2.
+
+14:01:24 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+14:01:25 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+14:01:26 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+14:01:26 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+14:01:47 - [INFO] - [7679018956] Начинаем скачивание потока 720p...
+14:05:54 - [INFO] - [7679018956] Исходник: 1280x720 | Кодеки: Video=av1, Audio=
+14:05:54 - [INFO] - [7679018956] Попытка аппаратного кодирования (Кодек=h264_amf)...
+14:05:54 - [ERROR] - [7679018956] Сбой FFmpeg (Код 3199971767): ng encoder - maybe incorrect parameters such as bit_rate, rate, width or height.
+[vf#0:0 @ 0000023008b20600] Error sending frames to consumers: Invalid data found when processing input
+[vf#0:0 @ 0000023008b20600] Task finished with error code: -1094995529 (Invalid data found when processing input)
+[vf#0:0 @ 0000023008b20600] Terminating thread with return code -1094995529 (Invalid data found when processing input)
+[vost#0:0/h264_amf @ 000002300583cf80] [enc:h264_amf @ 0000023005819100] Could not open encoder before EOF
+[vost#0:0/h264_amf @ 000002300583cf80] Task finished with error code: -22 (Invalid argument)
+[vost#0:0/h264_amf @ 000002300583cf80] Terminating thread with return code -22 (Invalid argument)
+[out#0/mp4 @ 0000023005836b40] Nothing was written into output file, because at least one of its streams received no packets.
+frame=    0 fps=0.0 q=0.0 Lsize=       0KiB time=N/A bitrate=N/A speed=N/A elapsed=0:00:00.09    
+[aac @ 0000023005883080] Qavg: 65536.000
+Conversion failed!
+
+14:05:54 - [WARNING] - [7679018956] ⚠️ Аппаратный кодек h264_amf завершился со сбоем. Автопереход на CPU (libx264)...
+14:32:02 - [INFO] - [7679018956] ✅ Видео (1849.1 МБ) успешно доставлено пользователю.
+14:34:55 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+14:34:56 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+14:34:57 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+14:34:57 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+14:35:05 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+14:40:44 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+14:40:44 - [ERROR] - [7679018956] Критический сбой: name 'TARGET_BITRATE' is not defined
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 707, in download_callback
+    final_filename, thumb_file = await asyncio.to_thread(
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "C:\Users\bro20\miniconda3\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 380, in download_and_optimize
+    bitrate_config = TARGET_BITRATE.get(str(format_choice), {'target': '2000k', 'max': '3000k'})
+                     ^^^^^^^^^^^^^^
+NameError: name 'TARGET_BITRATE' is not defined
+14:44:20 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+14:44:21 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+14:44:22 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+14:44:22 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+14:44:46 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+14:45:01 - [ERROR] - [7679018956] Критический сбой: [0;31mERROR:[0m [download] Got error: ("Connection broken: ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)", ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+Traceback (most recent call last):
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 703, in download_callback
+    final_filename, thumb_file = await asyncio.to_thread(
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "C:\Users\bro20\miniconda3\Lib\asyncio\threads.py", line 25, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\concurrent\futures\thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "F:\AppCaches\ffmpeg\MYBOT\youtube-monster-bot\bot.py", line 348, in download_and_optimize
+    ydl.download([url])
+    ~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3715, in download
+    self.__download_wrapper(self.extract_info)(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        url, force_generic_extractor=self.params.get('force_generic_extractor', False))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3688, in wrapper
+    res = func(*args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1721, in extract_info
+    return self.__extract_info(url, self.get_info_extractor(key), download, extra_info, process)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1732, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1888, in __extract_info
+    return self.process_ie_result(ie_result, download, extra_info)
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1947, in process_ie_result
+    ie_result = self.process_video_result(ie_result, download=download)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3135, in process_video_result
+    self.process_info(new_info)
+    ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 195, in wrapper
+    return func(self, *args, **kwargs)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3571, in process_info
+    partial_success, real_download = self.dl(fname, new_info)
+                                     ~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 3324, in dl
+    return fd.download(name, new_info, subtitle)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 480, in download
+    ret = self.real_download(filename, info_dict)
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\http.py", line 360, in real_download
+    for retry in RetryManager(self.params.get('retries'), self.report_retry):
+                 ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\utils\_utils.py", line 5300, in __iter__
+    self.error_callback(self.error, self.attempt, self.retries)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 413, in report_retry
+    RetryManager.report_retry(
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^
+        err, count, retries, info=self.__to_screen,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        sleep_func=self.params.get('retry_sleep_functions', {}).get(is_frag or 'http'),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        suffix=f'fragment{"s" if frag_index is None else f" {frag_index}"}' if is_frag else None)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\utils\_utils.py", line 5307, in report_retry
+    return error(f'{e}. Giving up after {count - 1} retries') if count > 1 else error(str(e))
+                                                                                ~~~~~^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\downloader\common.py", line 416, in <lambda>
+    error=IDENTITY if not fatal else lambda e: self.report_error(f'\r[download] Got error: {e}'),
+                                               ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1166, in report_error
+    self.trouble(f'{self._format_err("ERROR:", self.Styles.ERROR)} {message}', *args, **kwargs)
+    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\bro20\miniconda3\Lib\site-packages\yt_dlp\YoutubeDL.py", line 1104, in trouble
+    raise DownloadError(message, exc_info)
+yt_dlp.utils.DownloadError: [0;31mERROR:[0m [download] Got error: ("Connection broken: ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None)", ConnectionResetError(10054, 'Удаленный хост принудительно разорвал существующее подключение', None, 10054, None))
+14:45:22 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+14:48:43 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+14:48:43 - [INFO] - [7679018956] 🏎️ Запуск транскодирования видео (Энкодер: h264_amf)
+15:16:23 - [WARNING] - [7679018956] ⚠️ Кодек h264_amf упал. Откат на CPU. Ошибка: 17551KiB audio:91521KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.000001%
+frame=352039 fps=212 q=-0.0 Lsize= 5509073KiB time=01:37:53.16 bitrate=7684.2kbits/s speed=3.54x elapsed=0:27:39.14    
+[aac @ 000001dcce2a0cc0] Qavg: 865.967
+Exiting normally, received signal 2.
+
+15:16:35 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+15:16:35 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+15:16:36 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+15:16:36 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+15:16:53 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+15:16:57 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+15:16:57 - [INFO] - [7679018956] 🏎️ Запуск транскодирования видео (Энкодер: h264_amf)
+15:37:18 - [WARNING] - [7679018956] ⚠️ Кодек h264_amf упал. Откат на CPU. Ошибка: 4615957KiB audio:79214KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown
+frame=302921 fps=248 q=-0.0 Lsize= 4695040KiB time=01:24:13.71 bitrate=7610.6kbits/s speed=4.14x elapsed=0:20:20.44    
+[aac @ 000001f9bf7f5600] Qavg: 464.672
+Exiting normally, received signal 2.
+
+15:38:51 - [INFO] - ✅ Движок FFmpeg/FFprobe успешно проинициализирован.
+15:38:52 - [INFO] - 🔑 Авторизация в личном Premium-аккаунте...
+15:38:52 - [INFO] - 🚀 СИСТЕМА ДВОЙНОГО КОНТУРА АКТИВИРОВАНА!
+15:38:52 - [INFO] - 👑 Аккаунт владельца: ᅠ | Premium-статус: АКТИВЕН
+15:39:04 - [INFO] - [7679018956] Начинаем скачивание потока 1080p...
+15:39:15 - [INFO] - [7679018956] Исходник: 1920x1080 | Кодеки: Video=av1, Audio=
+15:39:15 - [INFO] - [7679018956] 🏎️ Запуск транскодирования видео (Энкодер: h264_amf)
+15:41:11 - [INFO] - [7679018956] ✅ Видео (189.0 МБ) успешно доставлено пользователю.
