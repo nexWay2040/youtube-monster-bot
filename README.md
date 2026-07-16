@@ -135,7 +135,7 @@ YouTube-Monster-Bot/
 
 **1. Клонирование и зависимости:**
 ```bash
-git clone https://github.com/USERNAME/youtube-monster-bot.git
+git clone https://github.com/nexWay2040/youtube-monster-bot.git
 cd youtube-monster-bot
 pip install -r requirements.txt
 ```
