@@ -443,22 +443,25 @@ class FFmpegBuilder:
         if 'amf' in encoder:
             qp_val = cls.AMF_QP_GRID.get(str(format_choice), '28')
             cmd.extend(['-rc', 'cqp', '-qp_i', qp_val, '-qp_p', qp_val])
+            
         elif 'nvenc' in encoder:
             cmd.extend(['-rc', 'vbr', '-b:v', t_rate, '-maxrate', m_rate])
+            
         elif 'qsv' in encoder:
             cmd.extend(['-b:v', t_rate, '-maxrate', m_rate])
+            
         else:
             est_bits = (int(m_rate.replace('k', '')) * 1024 + 128000) * duration
             max_safe_bits = (3900 if is_premium else 1900) * 1024 * 1024 * 8
             crf = 28 if est_bits > max_safe_bits else 18
-            # Сменили veryfast на ultrafast для ускорения процессора в 5 раз!
             cmd.extend([
-                '-preset', 'ultrafast', 
+                '-preset', 'veryfast', 
                 '-crf', str(crf), 
                 '-maxrate', m_rate, 
                 '-bufsize', f"{int(m_rate.replace('k', '')) * 2}k"
             ])
         
+        # КРИТИЧЕСКИЙ ФИКС: Принудительное приведение к 8-битному цвету yuv420p
         cmd.extend(['-pix_fmt', 'yuv420p'])
         cmd.extend(['-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', final_file])
         return cmd
@@ -475,9 +478,7 @@ class FFmpegBuilder:
         
         return [
             'ffmpeg', '-y', '-i', source_file,
-            '-c:v', 'libx264', 
-            '-preset', 'ultrafast',  # <-- Поставили ultrafast!
-            '-crf', str(crf),
+            '-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf),
             '-maxrate', m_rate, '-bufsize', f"{int(m_rate.replace('k', '')) * 2}k",
             '-pix_fmt', 'yuv420p',
             '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart',
