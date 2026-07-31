@@ -1,5 +1,17 @@
+# Ядро бота
 telethon>=1.30.0
+
+# Скачивание с YouTube
 yt-dlp[default]>=2025.1.1
+
+# Ускорение шифрования Telethon (криптография на C)
 cryptg
+
+# SOCKS5-прокси
 PySocks
+
+# Чтение .env
 python-dotenv
+
+# Обработка превью/изображений при отправке в Telegram
+Pillow>=10.0.0

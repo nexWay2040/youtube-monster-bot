@@ -1,17 +1,31 @@
-# Секретные конфигурационные файлы
+# ── СЕКРЕТЫ (никогда не коммитить!) ──
 .env
 .evn
 .env.txt
-*.db
-
-# Файлы сессий авторизации Telegram (ваши личные доступы)
 *.session
 *.session-journal
 
-# Временные папки скачивания и кэш Python
-downloads/
-__pycache__/
-*.pyc
-<<<<<<< HEAD
+# ── Базы данных и логи ──
+*.db
+*.db-journal
 *.log
 
+# ── Скачанный контент и временные файлы ──
+downloads/
+*.mp4
+*.mkv
+*.webm
+*.mp3
+*.part
+*.ytdl
+
+# ── Python ──
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ── IDE / редакторы ──
+.vscode/
+.idea/
