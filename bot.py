@@ -540,6 +540,8 @@ video_meta: Dict[str, dict] = {}
 is_premium = False
 bot_username = ""
 owner_id = 0
+# Лимит на одновременную отправку (строго по одному файлу)
+upload_semaphore = asyncio.Semaphore(1)
 
 
 # ═══════════════════════════════════════════════
@@ -788,70 +790,66 @@ def setup_handlers(client: TelegramClient):
             else:
                 final, thumb = await asyncio.to_thread(
                     process_video, meta["url"], quality, uid, vid, meta["duration"])
+            
             size_mb = os.path.getsize(final) / (1024 * 1024)
             has_premium = uid in PREMIUM_USERS and is_premium
             max_mb = 3950 if has_premium else 1950
+            
             if size_mb > max_mb:
-                await msg.edit(
-                    f"❌ **Файл слишком большой**\n"
-                    f"📦 Размер: `{size_mb:.0f} МБ`\n"
-                    f"🛡 Лимит: `{max_mb} МБ`")
+                await msg.edit(f"❌ **Файл слишком большой**\n📦 Размер: `{size_mb:.0f} МБ`\n🛡 Лимит: `{max_mb} МБ`")
                 await rm(final)
-                if thumb:
-                    await rm(thumb)
+                if thumb: await rm(thumb)
                 return
-            contour = "💎 Premium (4 ГБ)" if size_mb > 1950 else "📦 Standard (2 ГБ)"
-            await msg.edit(f"⚙️ **Видео готово!**\n📤 Загрузка [{contour}]...")
-            t0 = time.time()
-            last_edit = [time.time()]
-            last_text = [""]
 
-            async def on_progress(cur, total):
-                now = time.time()
-                if now - last_edit[0] < 4:
-                    return
-                pct = cur / total * 100
-                speed = cur / max(now - t0, 0.1)
-                eta = (total - cur) / speed if speed > 0 else 0
-                text = (
-                    f"🚀 **Выгрузка в Telegram**\n\n"
-                    f"📊 {progress_bar(pct)} **{pct:.0f}%**\n"
-                    f"⚡ Скорость: **{speed / 1024 / 1024:.1f} МБ/с**\n"
-                    f"⏳ Осталось: **{timedelta(seconds=int(eta))}**")
-                if text == last_text[0]:
-                    return
-                last_text[0] = text
-                last_edit[0] = now
-                try:
-                    await msg.edit(text)
-                except Exception:
-                    pass
+            # --- НАЧАЛО БЛОКА С ОТСТУПАМИ ---
+            async with upload_semaphore:
+                contour = "💎 Premium (4 ГБ)" if size_mb > 1950 else "📦 Standard (2 ГБ)"
+                await msg.edit(f"⚙️ **Видео готово!**\n📤 Загрузка [{contour}]...")
+                
+                t0 = time.time()
+                last_edit = [time.time()]
+                last_text = [""]
 
-            sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
-            uploaded = await upload_file(sender, final, on_progress if sender == client else None)
-            await msg.edit("⚡ **Финализация...**")
-            caption = f"🎬 **{meta['title']}**\n\n👤 {hashtag(meta['uploader'])}"
-            attrs = []
-            if quality == "mp3":
-                attrs.append(DocumentAttributeAudio(duration=meta["duration"], title=meta["title"]))
-            else:
-                info = probe(final)
-                attrs.append(DocumentAttributeVideo(
-                    duration=info["duration"] or meta["duration"],
-                    w=info["width"] or 1920, h=info["height"] or int(quality),
-                    supports_streaming=True))
-            sent = await sender.send_file(
-                uid, uploaded, caption=caption, thumb=thumb,
-                attributes=attrs, supports_streaming=True)
-            if sender == client and sent and sent.document:
-                try:
-                    db.set_cache(vid, quality, utils.pack_bot_file_id(sent.document))
-                except Exception:
-                    pass
+                async def on_progress(cur, total):
+                    now = time.time()
+                    if now - last_edit[0] < 4: return
+                    pct = cur / total * 100
+                    speed = cur / max(now - t0, 0.1)
+                    eta = (total - cur) / speed if speed > 0 else 0
+                    text = (f"🚀 **Выгрузка в Telegram**\n\n📊 {progress_bar(pct)} **{pct:.0f}%**\n"
+                            f"⚡ Скорость: **{speed / 1024 / 1024:.1f} МБ/с**\n⏳ Осталось: **{timedelta(seconds=int(eta))}**")
+                    if text == last_text[0]: return
+                    last_text[0] = text
+                    last_edit[0] = now
+                    try: await msg.edit(text)
+                    except Exception: pass
+
+                sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
+                uploaded = await upload_file(sender, final, on_progress if sender == client else None)
+                
+                await msg.edit("⚡ **Финализация...**")
+                caption = f"🎬 **{meta['title']}**\n\n👤 {hashtag(meta['uploader'])}"
+                attrs = []
+                if quality == "mp3":
+                    attrs.append(DocumentAttributeAudio(duration=meta["duration"], title=meta["title"]))
+                else:
+                    info = probe(final)
+                    attrs.append(DocumentAttributeVideo(
+                        duration=info["duration"] or meta["duration"],
+                        w=info["width"] or 1920, h=info["height"] or int(quality),
+                        supports_streaming=True))
+                
+                sent = await sender.send_file(uid, uploaded, caption=caption, thumb=thumb,
+                                            attributes=attrs, supports_streaming=True)
+                
+                if sender == client and sent and sent.document:
+                    try: db.set_cache(vid, quality, utils.pack_bot_file_id(sent.document))
+                    except Exception: pass
+            # --- КОНЕЦ БЛОКА С ОТСТУПАМИ ---
+
             db.add_stats(uid, size_mb)
             await rm(final)
-            if thumb:
-                await rm(thumb)
+            if thumb: await rm(thumb)
             await msg.delete()
             log.info(f"[{uid}] ✅ Готово: {size_mb:.1f} МБ")
         except Exception as e:
@@ -899,6 +897,7 @@ def setup_handlers(client: TelegramClient):
         except Exception as e:
             log.error(f"[{uid}] Meta error {vid}: {e}")
             return
+
         caption = f"🎬 **{title}**\n\n👤 {hashtag(uploader)}"
         cached = db.get_cache(vid, quality)
         if cached:
@@ -907,36 +906,39 @@ def setup_handlers(client: TelegramClient):
                 return
             except Exception:
                 db.del_cache(vid, quality)
+
         status = await client.send_message(uid, f"📥 **Обработка:**\n`{title[:60]}`")
         try:
             final, thumb = await asyncio.to_thread(process_video, url, quality, uid, vid, duration)
             size_mb = os.path.getsize(final) / (1024 * 1024)
-            max_mb = 3950 if (uid in PREMIUM_USERS and is_premium) else 1950
-            if size_mb > max_mb:
-                await status.edit(f"❌ `{title[:40]}`: {size_mb:.0f} МБ > лимит")
-                await rm(final)
-                if thumb:
-                    await rm(thumb)
-                return
-            info = probe(final)
-            attrs = [DocumentAttributeVideo(
-                duration=info["duration"] or duration,
-                w=info["width"] or 1280, h=info["height"] or int(quality),
-                supports_streaming=True)]
-            sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
-            uploaded = await upload_file(sender, final)
-            sent = await sender.send_file(
-                uid, uploaded, caption=caption, thumb=thumb,
-                attributes=attrs, supports_streaming=True)
-            if sender == client and sent and sent.document:
-                try:
-                    db.set_cache(vid, quality, utils.pack_bot_file_id(sent.document))
-                except Exception:
-                    pass
+            
+            # Очередь на отправку
+            async with upload_semaphore:
+                max_mb = 3950 if (uid in PREMIUM_USERS and is_premium) else 1950
+                if size_mb > max_mb:
+                    await status.edit(f"❌ `{title[:40]}`: {size_mb:.0f} МБ > лимит")
+                    await rm(final)
+                    if thumb: await rm(thumb)
+                    return
+                
+                info = probe(final)
+                attrs = [DocumentAttributeVideo(
+                    duration=info["duration"] or duration,
+                    w=info["width"] or 1280, h=info["height"] or int(quality),
+                    supports_streaming=True)]
+                
+                sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
+                uploaded = await upload_file(sender, final)
+                sent = await sender.send_file(uid, uploaded, caption=caption, thumb=thumb,
+                                            attributes=attrs, supports_streaming=True)
+                
+                if sender == client and sent and sent.document:
+                    try: db.set_cache(vid, quality, utils.pack_bot_file_id(sent.document))
+                    except Exception: pass
+
             db.add_stats(uid, size_mb)
             await rm(final)
-            if thumb:
-                await rm(thumb)
+            if thumb: await rm(thumb)
             await status.delete()
         except Exception as e:
             log.error(f"[{uid}] Playlist {vid}: {e}")
