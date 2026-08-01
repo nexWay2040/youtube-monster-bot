@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import json
+import html
 import math
 import random
 import asyncio
@@ -28,7 +29,7 @@ import socks
 from dotenv import load_dotenv, set_key
 
 # ─────────────────────────────────────────────
-# КОНФИГ (читается из .env, меняется консольным меню)
+# КОНФИГ
 # ─────────────────────────────────────────────
 ENV_FILE = ".env"
 for _f in (".env", ".evn", ".env.txt"):
@@ -57,6 +58,7 @@ PREMIUM_USERS: Set[int] = {
 DEFAULT_BATCH = int(_env("DEFAULT_BATCH_SIZE", "3"))
 USE_USERBOT = _env("USE_USERBOT", "true").lower() == "true"
 QUICK_START = _env("QUICK_START", "false").lower() == "true"
+OWNER_ID = int(_env("OWNER_ID", "0"))  # ID администратора (не зависит от юзербота)
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -73,7 +75,6 @@ log = logging.getLogger("bot")
 
 
 def update_env(key: str, value: str):
-    """Пишет ключ в .env и обновляет переменную окружения."""
     try:
         set_key(ENV_FILE, key, str(value))
     except Exception as e:
@@ -106,9 +107,45 @@ class DB:
             );
         """)
         self.conn.commit()
+        self._migrate()  # ← докидывает недостающие столбцы в старые базы
+
+    def _migrate(self):
+        """
+        Авто-миграция: если в старой базе нет какого-то столбца —
+        добавляем его через ALTER TABLE. Спасает от 'no such column'.
+        """
+        schema = {
+            "users": [
+                ("username", "username TEXT"),
+                ("joined_at", "joined_at TIMESTAMP"),
+                ("is_banned", "is_banned INTEGER DEFAULT 0"),
+                ("total_videos", "total_videos INTEGER DEFAULT 0"),
+                ("total_mb", "total_mb REAL DEFAULT 0"),
+            ],
+            "cache": [
+                ("created_at", "created_at TIMESTAMP"),
+            ],
+        }
+        for table, cols in schema.items():
+            try:
+                self.c.execute(f"PRAGMA table_info({table})")
+                existing = {row[1] for row in self.c.fetchall()}
+            except sqlite3.Error:
+                continue
+            for name, ddl in cols:
+                if name not in existing:
+                    try:
+                        self.c.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+                        log.info(f"🔧 Миграция БД: добавлен столбец {table}.{name}")
+                    except sqlite3.Error as e:
+                        log.warning(f"Не удалось добавить {table}.{name}: {e}")
+        self.conn.commit()
 
     def register_user(self, uid: int, uname: str = ""):
-        self.c.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?,?)", (uid, uname))
+        self.c.execute(
+            "INSERT INTO users (user_id, username) VALUES (?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username "
+            "WHERE excluded.username != ''", (uid, uname or ""))
         self.conn.commit()
 
     def is_banned(self, uid: int) -> bool:
@@ -116,9 +153,13 @@ class DB:
         row = self.c.fetchone()
         return bool(row[0]) if row else False
 
-    def set_ban(self, uid: int, banned: bool):
-        self.c.execute("UPDATE users SET is_banned=? WHERE user_id=?", (int(banned), uid))
+    def set_ban(self, uid: int, banned: bool) -> bool:
+        self.c.execute(
+            "INSERT INTO users (user_id, is_banned) VALUES (?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET is_banned=excluded.is_banned",
+            (uid, int(banned)))
         self.conn.commit()
+        return True
 
     def add_stats(self, uid: int, mb: float):
         self.c.execute(
@@ -194,6 +235,12 @@ def hashtag(name: str) -> str:
     return '#' + re.sub(r'\s+', '_', clean).lower() if clean else '#unknown'
 
 
+def user_link(uid: int, username: str = "") -> str:
+    """HTML-ссылка на профиль (работает даже без @username)."""
+    name = html.escape(f"@{username}") if username else f"User {uid}"
+    return f'<a href="tg://user?id={uid}">{name}</a>'
+
+
 async def rm(path: Optional[str]):
     if not path or not os.path.exists(path):
         return
@@ -250,7 +297,7 @@ def probe(path: str) -> dict:
 
 
 # ─────────────────────────────────────────────
-# FFmpeg: КОМАНДЫ ТРАНСКОДИРОВАНИЯ
+# FFmpeg
 # ─────────────────────────────────────────────
 BITRATES = {
     "1080": {"target": "4500k", "max": "7000k", "buf": "14000k"},
@@ -267,7 +314,6 @@ def ffmpeg_transcode(src: str, dst: str, quality: str, encoder: str, fps: int = 
     if "amf" in encoder or "nvenc" in encoder:
         cmd += ["-hwaccel", "d3d11va"]
     cmd += ["-i", src]
-
     if "amf" in encoder:
         cmd += [
             "-c:v", "h264_amf", "-rc", "vbr",
@@ -297,7 +343,6 @@ def ffmpeg_transcode(src: str, dst: str, quality: str, encoder: str, fps: int = 
             "-profile", "high", "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
             "-g", str(gop), "-bf", "3", "-pix_fmt", "yuv420p",
         ]
-
     cmd += ["-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
             "-movflags", "+faststart", dst]
     return cmd
@@ -390,10 +435,8 @@ def process_video(url: str, quality: str, user_id: int, video_id: str, duration:
     info = probe(src)
     log.info(f"[{user_id}] Probe: {info['width']}x{info['height']} "
              f"V={info['vcodec']} A={info['acodec']} {info['duration']}s {info['fps']}fps")
-
     dst = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}_out.mp4")
     fps = info["fps"] or 30
-
     if info["vcodec"] == "h264" and info["acodec"] in ("aac", "mp3"):
         log.info(f"[{user_id}] ⚡ Direct copy")
         cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy", "-c:a", "copy",
@@ -420,7 +463,6 @@ def process_video(url: str, quality: str, user_id: int, video_id: str, duration:
             ok, err = run_ffmpeg(cmd, dst)
         if not ok:
             raise RuntimeError(f"FFmpeg: {err[-300:]}")
-
     try:
         os.remove(src)
     except Exception:
@@ -490,7 +532,7 @@ async def upload_file(client: TelegramClient, path: str, progress_cb=None) -> ty
 
 
 # ─────────────────────────────────────────────
-# СОСТОЯНИЕ БОТА (заполняется при старте)
+# СОСТОЯНИЕ БОТА
 # ─────────────────────────────────────────────
 bot: Optional[TelegramClient] = None
 user_client: Optional[TelegramClient] = None
@@ -501,10 +543,12 @@ owner_id = 0
 
 
 # ═══════════════════════════════════════════════
-# ХЕНДЛЕРЫ (регистрируются после создания клиента)
+# ХЕНДЛЕРЫ
 # ═══════════════════════════════════════════════
 def setup_handlers(client: TelegramClient):
-    """Навешивает все обработчики на переданный TelegramClient."""
+
+    def is_admin(event) -> bool:
+        return owner_id != 0 and event.sender_id == owner_id
 
     @client.on(events.NewMessage(pattern=r"^/start$"))
     async def cmd_start(event):
@@ -523,7 +567,7 @@ def setup_handlers(client: TelegramClient):
 
     @client.on(events.NewMessage(pattern=r"^/admin$"))
     async def cmd_admin(event):
-        if event.sender_id != owner_id:
+        if not is_admin(event):
             return await event.respond("❌ Недостаточно прав.")
         s = db.stats()
         await event.respond(
@@ -535,45 +579,80 @@ def setup_handlers(client: TelegramClient):
             f"⚡ Кэш: `{s['cache']}` файлов\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"⚙️ Кодек: `{VIDEO_ENCODER}`\n"
-            f"💎 Premium: `{'Да (4 ГБ)' if is_premium else 'Нет (2 ГБ)'}`\n\n"
+            f"💎 Premium: `{'Да (4 ГБ)' if is_premium else 'Нет (2 ГБ)'}`\n"
+            f"👑 Админ ID: `{owner_id}`\n\n"
             "**Команды:**\n"
-            "`/users` — список юзеров\n"
+            "`/users` — список юзеров (со ссылками)\n"
+            "`/whitelist` — белый список (4 ГБ)\n"
+            "`/addpremium <ID>` — добавить в белый список\n"
+            "`/delpremium <ID>` — убрать из белого списка\n"
             "`/ban <ID>` — бан\n"
             "`/unban <ID>` — разбан\n"
             "`/broadcast <текст>` — рассылка")
 
     @client.on(events.NewMessage(pattern=r"^/users$"))
     async def cmd_users(event):
-        if event.sender_id != owner_id:
-            return
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
         users = db.get_users_list(50)
         if not users:
-            return await event.respond("📭 Пусто.")
-        lines = ["👥 **Последние 50 юзеров:**\n"]
-        for uid, uname, banned, vids in users:
+            return await event.respond("📭 В базе пока нет пользователей.")
+        lines = ["👥 <b>Последние 50 пользователей:</b>\n"]
+        for i, (uid, uname, banned, vids) in enumerate(users, 1):
             status = "⛔" if banned else "✅"
-            name = f"@{uname}" if uname else str(uid)
-            lines.append(f"{status} `{uid}` | {name} | 🎬{vids}")
-        await event.respond("\n".join(lines))
+            star = " 💎" if uid in PREMIUM_USERS else ""
+            lines.append(f"{status} {i}. {user_link(uid, uname)} — 🎬 {vids}{star}")
+        await event.respond("\n".join(lines), parse_mode="html")
+
+    @client.on(events.NewMessage(pattern=r"^/whitelist$"))
+    async def cmd_whitelist(event):
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
+        if not PREMIUM_USERS:
+            return await event.respond("📭 Белый список пуст.")
+        lines = ["💎 <b>Белый список (лимит 4 ГБ):</b>\n"]
+        for uid in sorted(PREMIUM_USERS):
+            lines.append(f"• {user_link(uid)} — <code>{uid}</code>")
+        await event.respond("\n".join(lines), parse_mode="html")
+
+    @client.on(events.NewMessage(pattern=r"^/addpremium (\d+)$"))
+    async def cmd_addpremium(event):
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
+        uid = int(event.pattern_match.group(1))
+        PREMIUM_USERS.add(uid)
+        update_env("PREMIUM_USERS", ",".join(str(x) for x in sorted(PREMIUM_USERS)))
+        await event.respond(f"✅ {user_link(uid)} добавлен в белый список (4 ГБ).", parse_mode="html")
+
+    @client.on(events.NewMessage(pattern=r"^/delpremium (\d+)$"))
+    async def cmd_delpremium(event):
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
+        uid = int(event.pattern_match.group(1))
+        PREMIUM_USERS.discard(uid)
+        update_env("PREMIUM_USERS", ",".join(str(x) for x in sorted(PREMIUM_USERS)))
+        await event.respond(f"🗑 {user_link(uid)} убран из белого списка.", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/ban (\d+)$"))
     async def cmd_ban(event):
-        if event.sender_id != owner_id:
-            return
-        db.set_ban(int(event.pattern_match.group(1)), True)
-        await event.respond(f"⛔ `{event.pattern_match.group(1)}` заблокирован.")
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
+        uid = int(event.pattern_match.group(1))
+        db.set_ban(uid, True)
+        await event.respond(f"⛔ {user_link(uid)} заблокирован.", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/unban (\d+)$"))
     async def cmd_unban(event):
-        if event.sender_id != owner_id:
-            return
-        db.set_ban(int(event.pattern_match.group(1)), False)
-        await event.respond(f"✅ `{event.pattern_match.group(1)}` разблокирован.")
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
+        uid = int(event.pattern_match.group(1))
+        db.set_ban(uid, False)
+        await event.respond(f"✅ {user_link(uid)} разблокирован.", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=r"^/broadcast (.+)"))
     async def cmd_broadcast(event):
-        if event.sender_id != owner_id:
-            return
+        if not is_admin(event):
+            return await event.respond("❌ Недостаточно прав.")
         text = event.pattern_match.group(1)
         users = db.all_users()
         ok = 0
@@ -592,10 +671,10 @@ def setup_handlers(client: TelegramClient):
     async def on_link(event):
         if db.is_banned(event.sender_id):
             return await event.respond("❌ Вы заблокированы.")
+        db.register_user(event.sender_id, event.sender.username or "")
         url = extract_url(event.text)
         uid = event.sender_id
 
-        # ── ПЛЕЙЛИСТ ──
         if "list=" in url:
             msg = await event.respond("📚 **Обнаружен плейлист!** Сканирую...")
             try:
@@ -628,7 +707,6 @@ def setup_handlers(client: TelegramClient):
                 await msg.edit(f"❌ Ошибка плейлиста:\n`{e}`")
             return
 
-        # ── ВИДЕО ──
         msg = await event.respond("🔍 **Анализирую видео...**")
         try:
             opts = ytdlp_opts()
@@ -645,7 +723,6 @@ def setup_handlers(client: TelegramClient):
             video_meta[vid] = {
                 "url": url, "title": title, "uploader": uploader,
                 "duration": duration, "heights": sorted(heights, reverse=True)}
-
             buttons, row = [], []
             for h in [1080, 720, 480, 360]:
                 if h in heights:
@@ -657,7 +734,6 @@ def setup_handlers(client: TelegramClient):
                 buttons.append(row)
             mp3_icon = "⚡" if db.get_cache(vid, "mp3") else "🎵"
             buttons.append([Button.inline(f"{mp3_icon} MP3", f"dl:mp3:{vid}")])
-
             await msg.edit(
                 f"🎥 **{title}**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -677,7 +753,6 @@ def setup_handlers(client: TelegramClient):
         meta = video_meta.get(vid)
         if not meta:
             return await event.answer("⚠️ Сессия устарела. Кинь ссылку заново.", alert=True)
-
         if meta.get("is_playlist"):
             kb = [
                 [Button.inline("⚡ По 1", f"pl:1:{quality}:{vid}"),
@@ -692,11 +767,9 @@ def setup_handlers(client: TelegramClient):
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"📦 *Сколько видео одновременно?*", buttons=kb)
             return
-
         await event.answer()
         q_label = "MP3 🎵" if quality == "mp3" else f"{quality}p 🎬"
         msg = await event.reply(f"⏳ **Запуск обработки...**\nКачество: `{q_label}`")
-
         cached = db.get_cache(vid, quality)
         if cached:
             try:
@@ -708,7 +781,6 @@ def setup_handlers(client: TelegramClient):
                 return
             except Exception:
                 db.del_cache(vid, quality)
-
         try:
             if quality == "mp3":
                 final = await asyncio.to_thread(download_mp3, meta["url"], uid, vid)
@@ -716,11 +788,9 @@ def setup_handlers(client: TelegramClient):
             else:
                 final, thumb = await asyncio.to_thread(
                     process_video, meta["url"], quality, uid, vid, meta["duration"])
-
             size_mb = os.path.getsize(final) / (1024 * 1024)
             has_premium = uid in PREMIUM_USERS and is_premium
             max_mb = 3950 if has_premium else 1950
-
             if size_mb > max_mb:
                 await msg.edit(
                     f"❌ **Файл слишком большой**\n"
@@ -730,10 +800,8 @@ def setup_handlers(client: TelegramClient):
                 if thumb:
                     await rm(thumb)
                 return
-
             contour = "💎 Premium (4 ГБ)" if size_mb > 1950 else "📦 Standard (2 ГБ)"
             await msg.edit(f"⚙️ **Видео готово!**\n📤 Загрузка [{contour}]...")
-
             t0 = time.time()
             last_edit = [time.time()]
             last_text = [""]
@@ -762,7 +830,6 @@ def setup_handlers(client: TelegramClient):
             sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
             uploaded = await upload_file(sender, final, on_progress if sender == client else None)
             await msg.edit("⚡ **Финализация...**")
-
             caption = f"🎬 **{meta['title']}**\n\n👤 {hashtag(meta['uploader'])}"
             attrs = []
             if quality == "mp3":
@@ -773,24 +840,20 @@ def setup_handlers(client: TelegramClient):
                     duration=info["duration"] or meta["duration"],
                     w=info["width"] or 1920, h=info["height"] or int(quality),
                     supports_streaming=True))
-
             sent = await sender.send_file(
                 uid, uploaded, caption=caption, thumb=thumb,
                 attributes=attrs, supports_streaming=True)
-
             if sender == client and sent and sent.document:
                 try:
                     db.set_cache(vid, quality, utils.pack_bot_file_id(sent.document))
                 except Exception:
                     pass
-
             db.add_stats(uid, size_mb)
             await rm(final)
             if thumb:
                 await rm(thumb)
             await msg.delete()
             log.info(f"[{uid}] ✅ Готово: {size_mb:.1f} МБ")
-
         except Exception as e:
             log.error(f"[{uid}] Ошибка: {e}", exc_info=True)
             await msg.edit(f"❌ **Ошибка:**\n`{str(e)[:200]}`")
@@ -836,7 +899,6 @@ def setup_handlers(client: TelegramClient):
         except Exception as e:
             log.error(f"[{uid}] Meta error {vid}: {e}")
             return
-
         caption = f"🎬 **{title}**\n\n👤 {hashtag(uploader)}"
         cached = db.get_cache(vid, quality)
         if cached:
@@ -845,7 +907,6 @@ def setup_handlers(client: TelegramClient):
                 return
             except Exception:
                 db.del_cache(vid, quality)
-
         status = await client.send_message(uid, f"📥 **Обработка:**\n`{title[:60]}`")
         try:
             final, thumb = await asyncio.to_thread(process_video, url, quality, uid, vid, duration)
@@ -884,7 +945,6 @@ def setup_handlers(client: TelegramClient):
                 if f.startswith(f"{uid}_{vid}"):
                     await rm(os.path.join(DOWNLOAD_DIR, f))
 
-
 # ═══════════════════════════════════════════════
 # КОНСОЛЬНОЕ МЕНЮ
 # ═══════════════════════════════════════════════
@@ -919,7 +979,6 @@ def _pause():
 
 
 def _wait_key(timeout: int = 5) -> bool:
-    """Ждёт нажатия клавиши до timeout сек (только Windows корректно)."""
     try:
         import msvcrt
         end = time.time() + timeout
@@ -935,12 +994,8 @@ def _wait_key(timeout: int = 5) -> bool:
 
 
 def run_menu() -> bool:
-    """
-    Крутит консольное меню настроек.
-    Возвращает True  — пользователь выбрал «Запустить».
-    Возвращает False — пользователь выбрал «Выход».
-    """
-    global VIDEO_ENCODER, USE_PROXY, DEFAULT_BATCH, BROWSER_COOKIES, USE_USERBOT, QUICK_START
+    global VIDEO_ENCODER, USE_PROXY, DEFAULT_BATCH, BROWSER_COOKIES
+    global USE_USERBOT, QUICK_START, OWNER_ID
 
     while True:
         _clear()
@@ -949,6 +1004,7 @@ def run_menu() -> bool:
         ub_state = "ВКЛЮЧЕН" if USE_USERBOT else "ВЫКЛЮЧЕН"
         ub_note = " (сессия есть ✅)" if (USE_USERBOT and has_session) else \
                   (" (сессии нет — запрошу при старте)" if USE_USERBOT else "")
+        admin_state = f"ID {OWNER_ID}" if OWNER_ID else "НЕ ЗАДАН ⚠️"
         print("  ПАНЕЛЬ УПРАВЛЕНИЯ БОТОМ\n")
         print(f"  [1] ▶️  ЗАПУСТИТЬ БОТА")
         print(f"  [2] 💎 Premium-юзербот (4 ГБ):     [{ub_state}]{ub_note}")
@@ -958,27 +1014,25 @@ def run_menu() -> bool:
         print(f"  [6] 🍪 Куки браузера:              [{BROWSER_COOKIES or 'выключены'}]")
         print(f"  [7] ⚡ Быстрый запуск (без меню):  [{'ВКЛЮЧЕН' if QUICK_START else 'ВЫКЛЮЧЕН'}]")
         print(f"  [8] 🗑️  Сбросить Premium-сессию")
+        print(f"  [9] 👑 ID администратора:          [{admin_state}]")
         print(f"  [0] ❌ Выход")
         print("========================================================================")
-        choice = input("  👉 Выберите пункт (0-8): ").strip()
+        choice = input("  👉 Выберите пункт (0-9): ").strip()
 
         if choice == "1":
             return True
-
         elif choice == "2":
             USE_USERBOT = not USE_USERBOT
             update_env("USE_USERBOT", str(USE_USERBOT).lower())
             if USE_USERBOT and not has_session:
                 print("\n  ℹ️  Premium включён. Сессии пока нет — это нормально.")
-                print("     При запуске бота (пункт 1) Telegram прямо в этом окне")
+                print("     При запуске (пункт 1) Telegram прямо в этом окне")
                 print("     попросит номер телефона и код подтверждения.")
-                print("     Введи их — и личный аккаунт привяжется для отдачи до 4 ГБ.")
             elif USE_USERBOT and has_session:
                 print("\n  ✅ Premium активен, сессия на месте.")
             else:
                 print("\n  📦 Premium выключен. Бот работает в режиме 2 ГБ.")
             _pause()
-
         elif choice == "3":
             print("\n  Доступные кодеки:")
             print("    1. libx264    — программный, на CPU (работает везде)")
@@ -993,13 +1047,11 @@ def run_menu() -> bool:
             else:
                 print("\n  ⚠️ Неверный номер, не меняю.")
             _pause()
-
         elif choice == "4":
             USE_PROXY = not USE_PROXY
             update_env("USE_PROXY", str(USE_PROXY).lower())
             print(f"\n  🌐 Прокси {'ВКЛЮЧЕН (' + PROXY_HOST + ':' + str(PROXY_PORT) + ')' if USE_PROXY else 'ВЫКЛЮЧЕН'}.")
             _pause()
-
         elif choice == "5":
             n = input("\n  👉 Сколько видео в пачке (1, 3, 5, 10): ").strip()
             if n.isdigit() and int(n) > 0:
@@ -1009,7 +1061,6 @@ def run_menu() -> bool:
             else:
                 print("\n  ⚠️ Нужно число больше нуля.")
             _pause()
-
         elif choice == "6":
             print("\n  Куки нужны для обхода JS-проверок YouTube и возрастных видео.")
             print("    1. Chrome    2. Firefox    3. Edge    4. Brave    0. Выключить")
@@ -1021,19 +1072,17 @@ def run_menu() -> bool:
             else:
                 print("\n  ⚠️ Неверный номер.")
             _pause()
-
         elif choice == "7":
             QUICK_START = not QUICK_START
             update_env("QUICK_START", str(QUICK_START).lower())
             if QUICK_START:
                 print("\n  ⚡ Быстрый запуск ВКЛЮЧЕН.")
-                print("     В следующий раз бот стартует сразу, без этого меню.")
-                print("     Чтобы снова открыть меню — запусти:  python bot.py menu")
-                print("     (или нажми любую клавишу в окне быстрого старта за 5 сек).")
+                print("     В следующий раз бот стартует сразу, без меню.")
+                print("     Открыть меню позже:  python bot.py menu")
+                print("     (или любая клавиша в окне быстрого старта за 5 сек).")
             else:
                 print("\n   Быстрый запуск ВЫКЛЮЧЕН — меню будет каждый раз.")
             _pause()
-
         elif choice == "8":
             removed = 0
             for f in ("user_session.session", "user_session.session-journal"):
@@ -1042,19 +1091,26 @@ def run_menu() -> bool:
                         os.remove(f); removed += 1
                     except Exception as e:
                         print(f"  ⚠️ Не удалось удалить {f}: {e}")
-            if removed:
-                print("\n  ✅ Premium-сессия сброшена.")
-                print("     При следующем запуске с включённым Premium (пункт 2)")
-                print("     Telegram заново попросит номер и код.")
-            else:
-                print("\n  ℹ️  Сессии не было — сбрасывать нечего.")
+            print("\n  ✅ Premium-сессия сброшена." if removed else "\n  ℹ️  Сессии не было — сбрасывать нечего.")
             _pause()
-
+        elif choice == "9":
+            print("\n  👑 ID администратора — это ваш Telegram ID.")
+            print("     Узнать: напишите боту @userinfobot или @getmyid_bot.")
+            print(f"     Текущий: {OWNER_ID or 'не задан'}")
+            v = input("\n  👉 Введите ID (число) или Enter чтобы оставить: ").strip()
+            if v == "":
+                print("\n  ℹ️  Не меняю.")
+            elif v.isdigit() and int(v) > 0:
+                OWNER_ID = int(v)
+                update_env("OWNER_ID", str(OWNER_ID))
+                print(f"\n  ✅ ID администратора: {OWNER_ID}")
+            else:
+                print("\n  ⚠️ Нужно число.")
+            _pause()
         elif choice == "0":
             _clear()
             print("\n  👋 Всего доброго!\n")
             return False
-
         else:
             print("\n  ⚠️ Неверный пункт.")
             _pause()
@@ -1067,7 +1123,6 @@ async def start_bot():
     global bot, user_client, is_premium, bot_username, owner_id
 
     proxy = (socks.SOCKS5, PROXY_HOST, PROXY_PORT) if USE_PROXY else None
-
     bot = TelegramClient("bot_session", API_ID, API_HASH, proxy=proxy)
     await bot.start(bot_token=BOT_TOKEN)
     me = await bot.get_me()
@@ -1076,16 +1131,22 @@ async def start_bot():
 
     if USE_USERBOT:
         user_client = TelegramClient("user_session", API_ID, API_HASH, proxy=proxy)
-        # Если сессии нет — Telethon интерактивно запросит номер/код прямо в консоли.
         await user_client.start()
         ume = await user_client.get_me()
-        owner_id = ume.id
+        if owner_id == 0:
+            owner_id = ume.id  # fallback: владелец юзербота = админ
         is_premium = getattr(ume, "premium", False)
         PREMIUM_USERS.add(owner_id)
         log.info(f"👤 Userbot: {ume.first_name} | Premium={'✅' if is_premium else '❌'}")
         log.info("🚀 Dual-contour активен (бот + юзербот, лимит 4 ГБ)")
     else:
         log.info("📦 Режим Standard (2 ГБ). Premium-юзербот выключен в меню.")
+
+    if owner_id == 0:
+        log.warning("⚠️ OWNER_ID не задан! Админ-команды (/admin, /users, /ban...) НЕ БУДУТ работать.")
+        log.warning("   Задайте ID админа в меню (пункт 9) или пропишите OWNER_ID в .env")
+    else:
+        log.info(f"👑 Администратор: {owner_id}")
 
     try:
         subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
@@ -1095,7 +1156,6 @@ async def start_bot():
         sys.exit(1)
 
     setup_handlers(bot)
-
     log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     log.info("🟢 БОТ ЗАПУЩЕН. Жду ссылки...")
     log.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -1107,9 +1167,7 @@ async def start_bot():
 # ═══════════════════════════════════════════════
 if __name__ == "__main__":
     force_menu = any(a in ("menu", "--menu", "-m", "config", "--config") for a in sys.argv[1:])
-
     if QUICK_START and not force_menu:
-        # Быстрый запуск: баннер + окно 5 сек, чтобы успеть открыть меню клавишей.
         print(BANNER)
         print("  ⚡  БЫСТРЫЙ ЗАПУСК — старт через 5 секунд...")
         print("     (нажмите ЛЮБУЮ клавишу сейчас, чтобы открыть меню настроек)")
@@ -1118,11 +1176,9 @@ if __name__ == "__main__":
         if _wait_key(5):
             if not run_menu():
                 sys.exit(0)
-        # иначе — стартуем с сохранёнными настройками
     else:
         if not run_menu():
             sys.exit(0)
-
     try:
         asyncio.run(start_bot())
     except KeyboardInterrupt:
