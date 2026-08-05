@@ -1,7 +1,9 @@
+# --- START OF FILE bot.py ---
+
 """
 YouTube Monster Bot — Ultimate Edition (working)
 Telethon + yt-dlp + FFmpeg (h264_amf) + SQLite3
-Windows / AMD RX 6600  •  Консольное меню + быстрый запуск
+Windows / AMD RX 6600  •  Консольное меню + быстрый запуск + ОТМЕНА ЗАГРУЗОК
 """
 
 import os
@@ -59,6 +61,11 @@ DEFAULT_BATCH = int(_env("DEFAULT_BATCH_SIZE", "3"))
 USE_USERBOT = _env("USE_USERBOT", "true").lower() == "true"
 QUICK_START = _env("QUICK_START", "false").lower() == "true"
 OWNER_ID = int(_env("OWNER_ID", "0"))  # ID администратора (не зависит от юзербота)
+
+
+COOKIE_FILE = _env("COOKIE_FILE", "")
+AI_BACKEND = _env("AI_BACKEND", "vulkan")
+
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
@@ -361,12 +368,29 @@ def ffmpeg_cpu_fallback(src: str, dst: str, quality: str, fps: int = 30) -> List
     ]
 
 
-def run_ffmpeg(cmd: List[str], output: str) -> Tuple[bool, str]:
+def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, str]:
     log.debug(f"FFmpeg: {' '.join(cmd)}")
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if r.returncode != 0 or not os.path.exists(output) or os.path.getsize(output) == 0:
-        err = (r.stderr or "")[-800:]
-        log.error(f"FFmpeg failed (code {r.returncode}): {err}")
+    try:
+        # Используем Popen вместо run, чтобы иметь возможность прервать процесс
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        while p.poll() is None:
+            if cancel_token and cancel_token.cancelled:
+                p.terminate()
+                raise ValueError("CANCELLED")
+            time.sleep(0.5)
+        out, err = p.communicate()
+        returncode = p.returncode
+    except ValueError as e:
+        if str(e) == "CANCELLED":
+            raise
+        return False, str(e)
+    except Exception as e:
+        log.error(f"FFmpeg error: {e}")
+        return False, str(e)
+
+    if returncode != 0 or not os.path.exists(output) or os.path.getsize(output) == 0:
+        err = (err or "")[-800:]
+        log.error(f"FFmpeg failed (code {returncode}): {err}")
         return False, err
     return True, ""
 
@@ -378,19 +402,50 @@ def ytdlp_opts() -> dict:
     opts = {
         "quiet": True, "no_warnings": True,
         "retries": 10, "fragment_retries": 10, "concurrent_fragment_downloads": 4,
+        
+        # --- АНТИ-БАН ОБХОД YOUTUBE ---
+        "extractor_args": {"youtube": ["player_client=web_safari,default,-android_sdkless"]},
+        "sleep_interval_requests": 1, 
     }
+    
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         opts["ffmpeg_location"] = os.path.dirname(ffmpeg_path)
+        
     if USE_PROXY:
         opts["proxy"] = f"socks5://{PROXY_HOST}:{PROXY_PORT}"
-    if BROWSER_COOKIES:
+        
+    # --- УМНАЯ ЛОГИКА КУКИ ДЛЯ GITHUB-ВЕРСИИ ---
+    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
+        opts["cookiefile"] = COOKIE_FILE
+        log.debug(f"🍪 Используется файл куки из .env: {COOKIE_FILE}")
+        
+    elif os.path.exists("cookies.txt"):
+        opts["cookiefile"] = "cookies.txt"
+        log.debug("🍪 Используется файл куки: cookies.txt")
+        
+    elif os.path.exists("www.youtube.com_cookies.txt"):
+        opts["cookiefile"] = "www.youtube.com_cookies.txt"
+        log.debug("🍪 Используется файл куки: www.youtube.com_cookies.txt")
+        
+    elif BROWSER_COOKIES and BROWSER_COOKIES.lower() not in ["none", "false", "0", ""]:
         opts["cookiesfrombrowser"] = (BROWSER_COOKIES,)
+        log.debug(f"🍪 Используются куки из браузера: {BROWSER_COOKIES}")
+        
+    else:
+        log.warning("⚠️ Куки не настроены. Возможны ошибки при скачивании с YouTube.")
+        
     return opts
 
 
-def download_video(url: str, quality: str, user_id: int, video_id: str) -> str:
+def download_video(url: str, quality: str, user_id: int, video_id: str, cancel_token=None) -> str:
     opts = ytdlp_opts()
+    if cancel_token:
+        def hook(d):
+            if cancel_token.cancelled:
+                raise ValueError("CANCELLED")
+        opts["progress_hooks"] = [hook]
+        
     opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}.%(ext)s")
     opts["writethumbnail"] = True
     opts["merge_output_format"] = "mp4"
@@ -411,8 +466,14 @@ def download_video(url: str, quality: str, user_id: int, video_id: str) -> str:
     return path
 
 
-def download_mp3(url: str, user_id: int, video_id: str) -> str:
+def download_mp3(url: str, user_id: int, video_id: str, cancel_token=None) -> str:
     opts = ytdlp_opts()
+    if cancel_token:
+        def hook(d):
+            if cancel_token.cancelled:
+                raise ValueError("CANCELLED")
+        opts["progress_hooks"] = [hook]
+        
     opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}.%(ext)s")
     opts["format"] = "bestaudio/best"
     opts["postprocessors"] = [
@@ -430,8 +491,8 @@ def download_mp3(url: str, user_id: int, video_id: str) -> str:
 # ─────────────────────────────────────────────
 # ОБРАБОТКА ВИДЕО
 # ─────────────────────────────────────────────
-def process_video(url: str, quality: str, user_id: int, video_id: str, duration: int) -> Tuple[str, Optional[str]]:
-    src = download_video(url, quality, user_id, video_id)
+def process_video(url: str, quality: str, user_id: int, video_id: str, duration: int, cancel_token=None) -> Tuple[str, Optional[str]]:
+    src = download_video(url, quality, user_id, video_id, cancel_token)
     info = probe(src)
     log.info(f"[{user_id}] Probe: {info['width']}x{info['height']} "
              f"V={info['vcodec']} A={info['acodec']} {info['duration']}s {info['fps']}fps")
@@ -441,26 +502,26 @@ def process_video(url: str, quality: str, user_id: int, video_id: str, duration:
         log.info(f"[{user_id}] ⚡ Direct copy")
         cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy", "-c:a", "copy",
                "-movflags", "+faststart", dst]
-        ok, err = run_ffmpeg(cmd, dst)
+        ok, err = run_ffmpeg(cmd, dst, cancel_token)
     elif info["vcodec"] == "h264":
         log.info(f"[{user_id}] 🎵 Video copy, audio → AAC")
         cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy",
                "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
                "-movflags", "+faststart", dst]
-        ok, err = run_ffmpeg(cmd, dst)
+        ok, err = run_ffmpeg(cmd, dst, cancel_token)
     else:
         log.info(f"[{user_id}] 🏎️ Transcode {info['vcodec']} → H.264 via {VIDEO_ENCODER}")
         ok, err = False, ""
         if VIDEO_ENCODER != "libx264":
             cmd = ffmpeg_transcode(src, dst, quality, VIDEO_ENCODER, fps)
-            ok, err = run_ffmpeg(cmd, dst)
+            ok, err = run_ffmpeg(cmd, dst, cancel_token)
         if not ok:
             if VIDEO_ENCODER != "libx264":
                 log.warning(f"[{user_id}] ⚠️ GPU failed → CPU fallback")
             if os.path.exists(dst):
                 os.remove(dst)
             cmd = ffmpeg_cpu_fallback(src, dst, quality, fps)
-            ok, err = run_ffmpeg(cmd, dst)
+            ok, err = run_ffmpeg(cmd, dst, cancel_token)
         if not ok:
             raise RuntimeError(f"FFmpeg: {err[-300:]}")
     try:
@@ -492,7 +553,7 @@ def make_thumb(user_id: int, video_id: str) -> Optional[str]:
 # ─────────────────────────────────────────────
 # ЗАГРУЗКА В TELEGRAM
 # ─────────────────────────────────────────────
-async def upload_file(client: TelegramClient, path: str, progress_cb=None) -> types.InputFileBig:
+async def upload_file(client: TelegramClient, path: str, progress_cb=None, cancel_token=None) -> types.InputFileBig:
     size = os.path.getsize(path)
     chunk = 512 * 1024
     parts = math.ceil(size / chunk)
@@ -506,6 +567,8 @@ async def upload_file(client: TelegramClient, path: str, progress_cb=None) -> ty
     async def worker(f):
         nonlocal uploaded
         while True:
+            if cancel_token and cancel_token.cancelled:
+                raise ValueError("CANCELLED")
             try:
                 idx = queue.get_nowait()
             except asyncio.QueueEmpty:
@@ -513,6 +576,8 @@ async def upload_file(client: TelegramClient, path: str, progress_cb=None) -> ty
             f.seek(idx * chunk)
             data = f.read(chunk)
             for attempt in range(4):
+                if cancel_token and cancel_token.cancelled:
+                    raise ValueError("CANCELLED")
                 try:
                     await client(functions.upload.SaveBigFilePartRequest(
                         file_id=file_id, file_part=idx, file_total_parts=parts, bytes=data))
@@ -532,7 +597,7 @@ async def upload_file(client: TelegramClient, path: str, progress_cb=None) -> ty
 
 
 # ─────────────────────────────────────────────
-# СОСТОЯНИЕ БОТА
+# СОСТОЯНИЕ БОТА И ТОКЕНЫ ОТМЕНЫ
 # ─────────────────────────────────────────────
 bot: Optional[TelegramClient] = None
 user_client: Optional[TelegramClient] = None
@@ -540,8 +605,18 @@ video_meta: Dict[str, dict] = {}
 is_premium = False
 bot_username = ""
 owner_id = 0
+
 # Лимит на одновременную отправку (строго по одному файлу)
 upload_semaphore = asyncio.Semaphore(1)
+
+class CancelToken:
+    def __init__(self):
+        self.cancelled = False
+    def cancel(self):
+        self.cancelled = True
+
+# Хранилище активных задач для отмены
+cancel_tokens: Dict[str, CancelToken] = {}
 
 
 # ═══════════════════════════════════════════════
@@ -747,6 +822,15 @@ def setup_handlers(client: TelegramClient):
         except Exception as e:
             await msg.edit(f"❌ Ошибка:\n`{e}`")
 
+    @client.on(events.CallbackQuery(pattern=b"^cancel:"))
+    async def on_cancel(event):
+        task_id = event.data.decode().split(":")[1]
+        if task_id in cancel_tokens:
+            cancel_tokens[task_id].cancel()
+            await event.answer("🛑 Отменяем загрузку...", alert=True)
+        else:
+            await event.answer("⚠️ Задача уже завершена или не найдена.", alert=True)
+
     @client.on(events.CallbackQuery(pattern=b"^dl:"))
     async def on_download(event):
         uid = event.sender_id
@@ -770,8 +854,16 @@ def setup_handlers(client: TelegramClient):
                 f"📦 *Сколько видео одновременно?*", buttons=kb)
             return
         await event.answer()
+        
+        # Создаем токен отмены для этой задачи
+        task_id = f"{uid}_{vid}"
+        token = CancelToken()
+        cancel_tokens[task_id] = token
+        cancel_kb = [[Button.inline("❌ Отмена", f"cancel:{task_id}")]]
+
         q_label = "MP3 🎵" if quality == "mp3" else f"{quality}p 🎬"
-        msg = await event.reply(f"⏳ **Запуск обработки...**\nКачество: `{q_label}`")
+        msg = await event.reply(f"⏳ **Запуск обработки...**\nКачество: `{q_label}`", buttons=cancel_kb)
+        
         cached = db.get_cache(vid, quality)
         if cached:
             try:
@@ -780,16 +872,17 @@ def setup_handlers(client: TelegramClient):
                 await client.send_file(uid, cached, caption=caption)
                 await msg.delete()
                 db.add_stats(uid, 0)
+                cancel_tokens.pop(task_id, None)
                 return
             except Exception:
                 db.del_cache(vid, quality)
         try:
             if quality == "mp3":
-                final = await asyncio.to_thread(download_mp3, meta["url"], uid, vid)
+                final = await asyncio.to_thread(download_mp3, meta["url"], uid, vid, token)
                 thumb = None
             else:
                 final, thumb = await asyncio.to_thread(
-                    process_video, meta["url"], quality, uid, vid, meta["duration"])
+                    process_video, meta["url"], quality, uid, vid, meta["duration"], token)
             
             size_mb = os.path.getsize(final) / (1024 * 1024)
             has_premium = uid in PREMIUM_USERS and is_premium
@@ -803,14 +896,16 @@ def setup_handlers(client: TelegramClient):
 
             # --- НАЧАЛО БЛОКА С ОТСТУПАМИ ---
             async with upload_semaphore:
+                if token.cancelled: raise ValueError("CANCELLED")
                 contour = "💎 Premium (4 ГБ)" if size_mb > 1950 else "📦 Standard (2 ГБ)"
-                await msg.edit(f"⚙️ **Видео готово!**\n📤 Загрузка [{contour}]...")
+                await msg.edit(f"⚙️ **Видео готово!**\n📤 Загрузка [{contour}]...", buttons=cancel_kb)
                 
                 t0 = time.time()
                 last_edit = [time.time()]
                 last_text = [""]
 
                 async def on_progress(cur, total):
+                    if token.cancelled: raise ValueError("CANCELLED")
                     now = time.time()
                     if now - last_edit[0] < 4: return
                     pct = cur / total * 100
@@ -821,12 +916,13 @@ def setup_handlers(client: TelegramClient):
                     if text == last_text[0]: return
                     last_text[0] = text
                     last_edit[0] = now
-                    try: await msg.edit(text)
+                    try: await msg.edit(text, buttons=cancel_kb)
                     except Exception: pass
 
                 sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
-                uploaded = await upload_file(sender, final, on_progress if sender == client else None)
+                uploaded = await upload_file(sender, final, on_progress if sender == client else None, token)
                 
+                if token.cancelled: raise ValueError("CANCELLED")
                 await msg.edit("⚡ **Финализация...**")
                 caption = f"🎬 **{meta['title']}**\n\n👤 {hashtag(meta['uploader'])}"
                 attrs = []
@@ -852,12 +948,26 @@ def setup_handlers(client: TelegramClient):
             if thumb: await rm(thumb)
             await msg.delete()
             log.info(f"[{uid}] ✅ Готово: {size_mb:.1f} МБ")
+            
+        except ValueError as e:
+            if str(e) == "CANCELLED":
+                log.info(f"[{uid}] 🛑 Загрузка отменена пользователем: {vid}")
+                await msg.edit("❌ **Операция отменена пользователем.**")
+                # Очистка мусора при отмене
+                for f in os.listdir(DOWNLOAD_DIR):
+                    if f.startswith(f"{uid}_{vid}"):
+                        await rm(os.path.join(DOWNLOAD_DIR, f))
+                return
+            else:
+                raise e
         except Exception as e:
             log.error(f"[{uid}] Ошибка: {e}", exc_info=True)
             await msg.edit(f"❌ **Ошибка:**\n`{str(e)[:200]}`")
             for f in os.listdir(DOWNLOAD_DIR):
                 if f.startswith(f"{uid}_"):
                     await rm(os.path.join(DOWNLOAD_DIR, f))
+        finally:
+            cancel_tokens.pop(task_id, None)
 
     @client.on(events.CallbackQuery(pattern=b"^pl:"))
     async def on_playlist(event):
@@ -869,23 +979,41 @@ def setup_handlers(client: TelegramClient):
             return await event.answer("⚠️ Сессия устарела.", alert=True)
         ids = meta["ids"]
         total = len(ids)
+        
+        # Токен отмены для всего плейлиста
+        task_id = f"{uid}_{pl_id}"
+        token = CancelToken()
+        cancel_tokens[task_id] = token
+        cancel_kb = [[Button.inline("❌ Отмена плейлиста", f"cancel:{task_id}")]]
+
         await event.edit(
             f"📚 **{meta['title']}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🎞 Всего: `{total}` | Пачки по `{batch}`\n"
             f"📐 Качество: `{quality}p`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏳ *Обрабатываю...*")
+            f"⏳ *Обрабатываю...*", buttons=cancel_kb)
+            
         for i in range(0, total, batch):
+            if token.cancelled:
+                break
             chunk = ids[i:i + batch]
-            tasks = [process_playlist_item(vid, quality, uid, delay=j * 1.5)
+            tasks = [process_playlist_item(vid, quality, uid, task_id, token, delay=j * 1.5)
                      for j, vid in enumerate(chunk)]
             await asyncio.gather(*tasks)
-        await client.send_message(uid, f"✅ **Плейлист обработан!**\n🎞 `{total}` видео доставлено.")
+            
+        if token.cancelled:
+            await client.send_message(uid, "❌ **Загрузка плейлиста отменена пользователем.**")
+        else:
+            await client.send_message(uid, f"✅ **Плейлист обработан!**\n🎞 `{total}` видео доставлено.")
+        cancel_tokens.pop(task_id, None)
 
-    async def process_playlist_item(vid: str, quality: str, uid: int, delay: float = 0):
+    async def process_playlist_item(vid: str, quality: str, uid: int, pl_task_id: str, token: CancelToken, delay: float = 0):
+        if token.cancelled: return
         if delay:
             await asyncio.sleep(delay)
+        if token.cancelled: return
+        
         url = f"https://www.youtube.com/watch?v={vid}"
         try:
             opts = ytdlp_opts()
@@ -907,13 +1035,15 @@ def setup_handlers(client: TelegramClient):
             except Exception:
                 db.del_cache(vid, quality)
 
-        status = await client.send_message(uid, f"📥 **Обработка:**\n`{title[:60]}`")
+        cancel_kb = [[Button.inline("❌ Отмена плейлиста", f"cancel:{pl_task_id}")]]
+        status = await client.send_message(uid, f"📥 **Обработка:**\n`{title[:60]}`", buttons=cancel_kb)
         try:
-            final, thumb = await asyncio.to_thread(process_video, url, quality, uid, vid, duration)
+            final, thumb = await asyncio.to_thread(process_video, url, quality, uid, vid, duration, token)
             size_mb = os.path.getsize(final) / (1024 * 1024)
             
             # Очередь на отправку
             async with upload_semaphore:
+                if token.cancelled: raise ValueError("CANCELLED")
                 max_mb = 3950 if (uid in PREMIUM_USERS and is_premium) else 1950
                 if size_mb > max_mb:
                     await status.edit(f"❌ `{title[:40]}`: {size_mb:.0f} МБ > лимит")
@@ -928,7 +1058,9 @@ def setup_handlers(client: TelegramClient):
                     supports_streaming=True)]
                 
                 sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
-                uploaded = await upload_file(sender, final)
+                uploaded = await upload_file(sender, final, cancel_token=token)
+                
+                if token.cancelled: raise ValueError("CANCELLED")
                 sent = await sender.send_file(uid, uploaded, caption=caption, thumb=thumb,
                                             attributes=attrs, supports_streaming=True)
                 
@@ -940,6 +1072,15 @@ def setup_handlers(client: TelegramClient):
             await rm(final)
             if thumb: await rm(thumb)
             await status.delete()
+            
+        except ValueError as e:
+            if str(e) == "CANCELLED":
+                await status.edit(f"❌ `{title[:40]}`: Отменено.")
+                for f in os.listdir(DOWNLOAD_DIR):
+                    if f.startswith(f"{uid}_{vid}"):
+                        await rm(os.path.join(DOWNLOAD_DIR, f))
+                return
+            raise e
         except Exception as e:
             log.error(f"[{uid}] Playlist {vid}: {e}")
             await status.edit(f"❌ Ошибка: `{str(e)[:100]}`")
@@ -1013,7 +1154,14 @@ def run_menu() -> bool:
         print(f"  [3] 🎥 Видеокодек:                 [{CODEC_NAMES.get(VIDEO_ENCODER, VIDEO_ENCODER)}]")
         print(f"  [4] 🌐 Прокси Happ/VPN:            [{'ВКЛЮЧЕН' if USE_PROXY else 'ВЫКЛЮЧЕН'}]")
         print(f"  [5] 📦 Пачка плейлиста:            [по {DEFAULT_BATCH} видео]")
-        print(f"  [6] 🍪 Куки браузера:              [{BROWSER_COOKIES or 'выключены'}]")
+        
+        # Умное отображение куки в меню
+        if os.path.exists("www.youtube.com_cookies.txt") or os.path.exists("cookies.txt") or (COOKIE_FILE and os.path.exists(COOKIE_FILE)):
+            cookie_status = "ФАЙЛ (.txt) 🟢"
+        else:
+            cookie_status = BROWSER_COOKIES or 'выключены'
+            
+        print(f"  [6] 🍪 Куки:                       [{cookie_status}]")
         print(f"  [7] ⚡ Быстрый запуск (без меню):  [{'ВКЛЮЧЕН' if QUICK_START else 'ВЫКЛЮЧЕН'}]")
         print(f"  [8] 🗑️  Сбросить Premium-сессию")
         print(f"  [9] 👑 ID администратора:          [{admin_state}]")
