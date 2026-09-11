@@ -5,6 +5,11 @@
 *.session
 *.session-journal
 
+# ── Куки и авторизация YouTube (никогда не сливать на GitHub!) ──
+*cookies*.txt
+cookies.txt
+*.cookies
+
 # ── Базы данных и логи ──
 *.db
 *.db-journal
