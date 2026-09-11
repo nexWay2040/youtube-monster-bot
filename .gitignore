@@ -5,14 +5,16 @@
 *.session
 *.session-journal
 
-# ── Куки и авторизация YouTube (никогда не сливать на GitHub!) ──
+# ── Куки и авторизация YouTube ──
 *cookies*.txt
 cookies.txt
 *.cookies
 
-# ── Базы данных и логи ──
+# ── Базы данных и временные файлы SQLite ──
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.log
 
 # ── Скачанный контент и временные файлы ──
