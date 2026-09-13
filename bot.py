@@ -694,17 +694,18 @@ def ffmpeg_transcode(src: str, dst: str, quality: str, encoder: str, fps: int = 
         cmd += ["-vf", vf]
     if "amf" in encoder:
         cmd += [
-            "-c:v", "h264_amf", "-rc", "vbr",
+            "-c:v", "h264_amf",
+            "-rc", "vbr_peak",
             "-b:v", cfg["target"], "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-quality", "balanced", "-profile", "high", "-level", "4.2",
-            "-g", str(gop), "-bf", "3", "-header_insertion_mode", "gop",
+            "-quality", "balanced", "-profile:v", "high",
+            "-g", str(gop),
             "-pix_fmt", "yuv420p",
         ]
     elif "nvenc" in encoder:
         cmd += [
             "-c:v", "h264_nvenc", "-rc", "vbr",
             "-b:v", cfg["target"], "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-preset", "p5", "-tune", "hq", "-profile", "high",
+            "-preset", "p5", "-tune", "hq", "-profile:v", "high",
             "-spatial_aq", "1", "-temporal_aq", "1",
             "-g", str(gop), "-bf", "3", "-pix_fmt", "yuv420p",
         ]
@@ -712,13 +713,13 @@ def ffmpeg_transcode(src: str, dst: str, quality: str, encoder: str, fps: int = 
         cmd += [
             "-c:v", "h264_qsv",
             "-b:v", cfg["target"], "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-preset", "medium", "-profile", "high",
+            "-preset", "medium", "-profile:v", "high",
             "-g", str(gop), "-bf", "3", "-look_ahead", "1", "-pix_fmt", "yuv420p",
         ]
     else:
         cmd += [
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-            "-profile", "high", "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
+            "-profile:v", "high", "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
             "-g", str(gop), "-bf", "3", "-pix_fmt", "yuv420p",
         ]
     cmd += [
@@ -746,18 +747,41 @@ def ffmpeg_cpu_fallback(src: str, dst: str, quality: str, fps: int = 30, vf: Opt
     return cmd
 
 def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, str]:
+    err_lines = []
     try:
         p = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace"
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1
         )
-        while p.poll() is None:
+        
+        # Читаем stderr по мере поступления, чтобы буфер Windows (64 КБ) никогда не переполнялся и не вешал процесс
+        while True:
             if cancel_token and cancel_token.cancelled:
                 p.terminate()
+                try:
+                    p.wait(timeout=3)
+                except Exception:
+                    p.kill()
                 raise ValueError("CANCELLED")
-            time.sleep(0.4)
-        out, err = p.communicate()
+
+            line = p.stderr.readline()
+            if line:
+                err_lines.append(line)
+                if len(err_lines) > 60:
+                    err_lines.pop(0)
+            elif p.poll() is not None:
+                break
+            else:
+                time.sleep(0.05)
+
+        p.wait()
         returncode = p.returncode
+        err = "".join(err_lines)
     except ValueError as e:
         if str(e) == "CANCELLED":
             raise
@@ -765,12 +789,12 @@ def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, st
     except Exception as e:
         term_log("❌ FFMPEG", f"Ошибка процесса: {e}", Colors.RED)
         return False, str(e)
+
     if returncode != 0 or not os.path.exists(output) or os.path.getsize(output) == 0:
         err = (err or "")[-600:]
         term_log("❌ FFMPEG FAIL", f"Код {returncode}: {err}", Colors.RED)
         return False, err
     return True, ""
-
 # ─────────────────────────────────────────────
 # YT-DLP ОПЦИИ (ПОЛНЫЙ ПАРСИНГ HLS И DASH)
 # ─────────────────────────────────────────────
