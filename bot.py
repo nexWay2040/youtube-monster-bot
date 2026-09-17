@@ -1,19 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-███╗   ███╗ ██████╗ ███╗   ██╗███████╗████████╗███████╗██████╗ 
-████╗ ████║██╔═══██╗████╗  ██║██╔════╝╚══██╔══╝██╔════╝██╔══██╗
-██╔████╔██║██║   ██║██╔██╗ ██║███████╗   ██║   █████╗  ██████╔╝
-██║╚██╔╝██║██║   ██║██║╚██╗██║╚════██║   ██║   ██╔══╝  ██╔══██╗
-██║ ╚═╝ ██║╚██████╔╝██║ ╚████║███████║   ██║   ███████╗██║  ██║
-╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
-       ██████╗  ██████╗ ████████╗
-       ██╔══██╗██╔═══██╗╚══██╔══╝
-       ██████╔╝██║   ██║   ██║   
-       ██╔══██╗██║   ██║   ██║   
-       ██████╔╝╚██████╔╝   ██║   
-       ╚═════╝  ╚═════╝    ╚═╝   
-YouTube Monster Bot — Ultimate Edition
-Telethon + yt-dlp + FFmpeg (AMD RX 6600 h264_amf) + SQLite3 + Deep Audio Detection
+YouTube Monster Bot — Ultimate Edition (Direct Copy + Smart Cache + Yandex AI)
+All Bugs Fixed: Cache Reply Button, Real Dubbing Engine & Title Translation
 """
 
 import os
@@ -22,6 +10,9 @@ import sys
 import json
 import html
 import math
+import hmac
+import struct
+import hashlib
 import random
 import asyncio
 import logging
@@ -29,6 +20,8 @@ import time
 import subprocess
 import shutil
 import sqlite3
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, List, Dict, Set
 
@@ -52,9 +45,6 @@ if os.name == 'nt':
     except Exception:
         pass
 
-# ─────────────────────────────────────────────
-# ЦВЕТА И ТЕРМИНАЛЬНЫЕ ЛОГИ
-# ─────────────────────────────────────────────
 class Colors:
     RESET = "\033[0m"
     BOLD = "\033[1m"
@@ -85,8 +75,8 @@ def log_banner():
        ██╔══██╗██║   ██║   ██║   
        ██████╔╝╚██████╔╝   ██║   
        ╚═════╝  ╚═════╝    ╚═╝   {Colors.YELLOW}
-  ⚡ Telethon + yt-dlp + FFmpeg (h264_amf) | AMD RX 6600
-  🛡️ Ultra Engine | 4GB Premium Contour | Deep Multi-Audio Extractor{Colors.RESET}
+  ⚡ Telethon + yt-dlp + FFmpeg (Direct Copy) | Pure Speed Engine
+  🛡️ Local Cache V2 (Newest First) | Yandex Neural Dubbing | 4GB Flow{Colors.RESET}
 """
     print(banner)
 
@@ -96,9 +86,6 @@ def get_now() -> str:
 def term_log(tag: str, msg: str, color: str = Colors.WHITE):
     print(f"{Colors.DIM}[{get_now()}]{Colors.RESET} {color}{Colors.BOLD}{tag:<16}{Colors.RESET} {msg}")
 
-# ─────────────────────────────────────────────
-# КОНФИГУРАЦИЯ (.env)
-# ─────────────────────────────────────────────
 ENV_FILE = ".env"
 for _f in (".env", ".evn", ".env.txt"):
     if os.path.exists(_f):
@@ -114,7 +101,6 @@ API_ID = int(_env("API_ID", "0"))
 API_HASH = _env("API_HASH", "")
 BOT_TOKEN = _env("BOT_TOKEN", "")
 DOWNLOAD_DIR = _env("DOWNLOAD_DIR", "./downloads")
-VIDEO_ENCODER = _env("VIDEO_ENCODER", "h264_amf")
 BROWSER_COOKIES = _env("BROWSER_COOKIES", "")
 USE_PROXY = _env("USE_PROXY", "false").lower() == "true"
 PROXY_HOST = _env("PROXY_HOST", "127.0.0.1")
@@ -140,14 +126,39 @@ DEFAULT_BATCH = int(_env("DEFAULT_BATCH_SIZE", "3"))
 USE_USERBOT = _env("USE_USERBOT", "true").lower() == "true"
 QUICK_START = _env("QUICK_START", "false").lower() == "true"
 COOKIE_FILE = _env("COOKIE_FILE", "")
+COOKIE_MAX_AGE_HOURS = float(_env("COOKIE_MAX_AGE_HOURS", "12"))
 
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+def cleanup_download_dir_on_boot():
+    """Чистим огрызки файлов, оставшиеся после падения/перезапуска бота
+    (частично скачанные видео, .part файлы, забытые превью и т.д.)."""
+    removed, freed_mb = 0, 0.0
+    try:
+        for f in os.listdir(DOWNLOAD_DIR):
+            fp = os.path.join(DOWNLOAD_DIR, f)
+            if not os.path.isfile(fp):
+                continue
+            try:
+                freed_mb += os.path.getsize(fp) / (1024 * 1024)
+                os.remove(fp)
+                removed += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return removed, freed_mb
+
+from logging.handlers import RotatingFileHandler
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
-    handlers=[logging.FileHandler("bot.log", encoding="utf-8")],
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        RotatingFileHandler("bot.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"),
+    ],
 )
 log = logging.getLogger("bot")
 
@@ -244,35 +255,23 @@ class DB:
             (mb, uid))
         self.conn.commit()
 
+    def get_user_stats(self, uid: int) -> Tuple[int, float]:
+        self.c.execute("SELECT total_videos, total_mb FROM users WHERE user_id=?", (uid,))
+        row = self.c.fetchone()
+        return (row[0] or 0, row[1] or 0.0) if row else (0, 0.0)
+
     def get_cache(self, vid: str, quality: str, lang: str = "orig") -> Optional[Tuple[str, str]]:
-        if lang in ("ru", "en"):
-            q_key = f"{quality}_{lang}"
-            self.c.execute("SELECT file_id, title FROM cache WHERE video_id=? AND quality=?", (vid, q_key))
-            row = self.c.fetchone()
-            if row and row[0]:
-                return row[0], row[1] or ""
-            if lang == "ru":
-                self.c.execute("SELECT file_id, title FROM cache WHERE video_id=? AND quality=?", (vid, str(quality)))
-                row = self.c.fetchone()
-                if row and row[0]:
-                    return row[0], row[1] or ""
-        else:
-            self.c.execute("SELECT file_id, title FROM cache WHERE video_id=? AND quality=?", (vid, str(quality)))
-            row = self.c.fetchone()
-            if row and row[0]:
-                return row[0], row[1] or ""
-            self.c.execute("SELECT file_id, title FROM cache WHERE video_id=? AND quality LIKE ?", (vid, f"{quality}_%"))
-            row = self.c.fetchone()
-            if row and row[0]:
-                return row[0], row[1] or ""
+        """Строгий поиск в кэше без смешивания языков"""
+        q_key = f"{quality}_{lang}"
+        self.c.execute("SELECT file_id, title FROM cache WHERE video_id=? AND quality=?", (vid, q_key))
+        row = self.c.fetchone()
+        if row and row[0]:
+            return row[0], row[1] or ""
         return None
 
     def set_cache(self, vid: str, quality: str, lang: str, file_id: str, title: str = ""):
-        if lang in ("ru", "en"):
-            q_key = f"{quality}_{lang}"
-        else:
-            q_key = str(quality)
-
+        """Строгое сохранение с префиксом озвучки (orig, ya, ru, en)"""
+        q_key = f"{quality}_{lang}"
         clean_title = (title or "").strip()
         if not clean_title or clean_title.lower() in ("none", "без названия", "unknown"):
             clean_title = f"YouTube {vid}"
@@ -284,7 +283,9 @@ class DB:
     def update_title_if_needed(self, vid: str, title: str):
         if not title or title.lower() in ("none", "без названия", "unknown"):
             return
-        self.c.execute("UPDATE cache SET title=? WHERE video_id=? AND (title IS NULL OR title='' OR title='Без названия')", (title, vid))
+        self.c.execute(
+            "UPDATE cache SET title=? WHERE video_id=? AND (title IS NULL OR title='' OR title='Без названия')",
+            (title, vid))
         self.conn.commit()
 
     def del_cache(self, vid: str, quality_key: str = "") -> int:
@@ -310,7 +311,7 @@ class DB:
     def search_cache(self, query: str, limit: int = 15) -> list:
         self.c.execute(
             "SELECT video_id, quality, title, created_at, file_id FROM cache "
-            "WHERE title LIKE ? OR video_id LIKE ? ORDER BY created_at DESC LIMIT ?",
+            "WHERE title LIKE ? OR video_id LIKE ? ORDER BY rowid DESC LIMIT ?",
             (f"%{query}%", f"%{query}%", limit))
         return self.c.fetchall()
 
@@ -320,7 +321,7 @@ class DB:
         offset = (page - 1) * page_size
         self.c.execute(
             "SELECT video_id, quality, title, created_at, file_id FROM cache "
-            "ORDER BY created_at DESC LIMIT ? OFFSET ?", (page_size, offset))
+            "ORDER BY rowid DESC LIMIT ? OFFSET ?", (page_size, offset))
         items = self.c.fetchall()
         return items, total
 
@@ -367,8 +368,30 @@ class DB:
 db = DB()
 
 # ─────────────────────────────────────────────
-# УТИЛИТЫ И ПРОВЕРКА ПОЛЬЗОВАТЕЛЕЙ
+# УТИЛИТЫ И ПРАВА
 # ─────────────────────────────────────────────
+def is_premium_user(uid: int, username: str = "") -> bool:
+    if uid in PREMIUM_USERS:
+        return True
+    uname = (username or "").strip().lower().lstrip("@")
+    if uname and uname in PREMIUM_USERNAMES:
+        return True
+    if not uname:
+        try:
+            db.c.execute("SELECT username FROM users WHERE user_id=?", (uid,))
+            row = db.c.fetchone()
+            if row and row[0]:
+                uname = row[0].strip().lower().lstrip("@")
+        except Exception:
+            uname = ""
+    return bool(uname and uname in PREMIUM_USERNAMES)
+
+def is_admin(uid: int) -> bool:
+    return uid == OWNER_ID or uid in ADMIN_IDS or db.is_admin_in_db(uid)
+
+def is_owner(uid: int) -> bool:
+    return uid == OWNER_ID
+
 def fmt_size(n: float) -> str:
     for unit in ("Б", "КБ", "МБ", "ГБ"):
         if abs(n) < 1024:
@@ -394,6 +417,37 @@ def hashtag(name: str) -> str:
 def user_link(uid: int, username: str = "") -> str:
     name = html.escape(f"@{username}") if username else f"User {uid}"
     return f'<a href="tg://user?id={uid}">{name}</a>'
+
+async def translate_title_to_ru(text: str) -> Optional[str]:
+    if not text or not re.search(r'[a-zA-Z]', text):
+        return None
+    try:
+        # Клиент Google Translate с полным контекстом фразы
+        url = "https://translate.googleapis.com/translate_a/single"
+        params = {
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "ru",
+            "dt": "t",
+            "dj": "1",
+            "q": text
+        }
+        full_url = f"{url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(full_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
+        })
+        loop = asyncio.get_running_loop()
+        def _fetch():
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                sentences = [s.get("trans", "") for s in data.get("sentences", []) if "trans" in s]
+                return "".join(sentences).strip()
+        trans = await loop.run_in_executor(None, _fetch)
+        if trans and trans.strip().lower() != text.strip().lower():
+            return trans.strip()
+    except Exception:
+        pass
+    return None
 
 async def resolve_user(client: TelegramClient, user_input: str) -> Tuple[Optional[int], Optional[str], Optional[str]]:
     clean = user_input.strip()
@@ -541,107 +595,171 @@ def get_available_tiers(info: dict) -> List[int]:
 
     return sorted(result, reverse=True)
 
+def estimate_size_mb(duration: int, tier: int) -> int:
+    bitrates = {1080: 3500, 720: 1800, 480: 900, 360: 500}
+    br = bitrates.get(tier, 1500)
+    dur = max(duration, 1)
+    mb = int((br * dur) / (8 * 1024))
+    return max(mb, 1)
+
 # ─────────────────────────────────────────────
-# УГЛУБЛЁННОЕ РАСПОЗНАВАНИЕ ДУБЛЯЖЕЙ И AI-ПЕРЕВОДА
+# ОПРЕДЕЛЕНИЕ ДУБЛЯЖЕЙ (ИСПРАВЛЕНО)
 # ─────────────────────────────────────────────
 def detect_audio_tracks(info: dict) -> Dict[str, any]:
-    """
-    Глубокое сканирование ВСЕХ форматов видео (DASH, HLS m3u8, комбинированные).
-    Распознает официальный дубляж, альтернативные дорожки и AI-автодубляж YouTube.
-    """
     formats = info.get("formats", []) or []
     
     languages_found = set()
     has_ru = False
     has_en = False
-    has_alternate_tracks = False
+    has_ru_dub = False
 
-    # 1. Проверяем все форматы со звуком (включая HLS потоки 91-96 и m3u8)
+    title_str = (info.get("title") or "").strip()
+    cyr_count = len(re.findall(r'[а-яА-ЯёЁ]', title_str))
+    lat_count = len(re.findall(r'[a-zA-Z]', title_str))
+    is_russian_by_title = cyr_count > lat_count and cyr_count >= 3
+
     for f in formats:
-        # Проверяем, есть ли аудио в этом формате
         acodec = str(f.get("acodec") or "").lower()
         if acodec in ("none", "") and f.get("vcodec") != "none":
             continue
 
         lang = str(f.get("language") or "").lower()
         note = str(f.get("format_note") or "").lower()
-        fid = str(f.get("format_id") or "").lower()
         track_id = str(f.get("audio_track_id") or "").lower()
         format_str = str(f.get("format") or "").lower()
 
-        # Маркеры дубляжа / автодубляжа
-        is_dub = any(k in note for k in ("dub", "auto-dub", "дубл", "alternate", "descriptive"))
-        is_alt_id = bool(re.search(r'^\d+-\d+$', fid))
-
-        if is_dub or is_alt_id:
-            has_alternate_tracks = True
-
-        # Проверка на русский язык
-        is_russian = (
+        is_r = (
             lang.startswith("ru") or 
             any(k in note for k in ("russian", "русск", "ru-")) or
-            any(k in track_id for k in ("ru.", ".ru", "russian")) or
-            any(k in format_str for k in ("ru", "russian", "русск"))
+            any(k in track_id for k in ("ru.", ".ru")) or
+            "русск" in format_str
         )
-
-        # Проверка на английский язык
-        is_english = (
-            lang.startswith("en") or 
-            any(k in note for k in ("english", "original", "en-")) or
-            any(k in track_id for k in ("en.", ".en", "english", "original")) or
-            any(k in format_str for k in ("en", "english"))
-        )
-
-        if is_russian:
+        if is_r:
             has_ru = True
             languages_found.add("ru")
-        elif is_english:
+            if any(k in note for k in ("dub", "auto-dub", "дубл")):
+                has_ru_dub = True
+
+        is_e = (
+            lang.startswith("en") or 
+            "english" in note or 
+            "en." in track_id or ".en" in track_id
+        )
+        if is_e:
             has_en = True
             languages_found.add("en")
-        elif lang and len(lang) >= 2 and lang != "none":
-            languages_found.add(lang[:2])
 
-    # 2. Также смотрим метаданные субтитров/автопереводов
-    subs = info.get("subtitles") or {}
-    auto_subs = info.get("automatic_captions") or {}
-    if "ru" in subs or "ru" in auto_subs:
-        pass  # информативно, но опираемся на видеопотоки
+    if (is_russian_by_title or (has_ru and not has_en)) and not has_ru_dub:
+        return {
+            "is_russian": True,
+            "has_official_dub": False,
+            "needs_yandex_ai": False,
+            "has_ru": True,
+            "has_en": False
+        }
 
-    # Видео считается мультиязычным, ТОЛЬКО если найден русский дубляж вместе с оригиналом,
-    # либо найдено более одного языка, либо есть явные маркеры альтернативных аудиопотоков
-    is_multi = (has_ru and has_en) or len(languages_found) > 1 or (has_ru and has_alternate_tracks)
+    has_official_dub = (has_en and has_ru) or has_ru_dub
+    needs_yandex_ai = not has_ru and (has_en or not is_russian_by_title)
 
     return {
-        "is_multiaudio": is_multi,
+        "is_russian": is_russian_by_title and not has_official_dub,
+        "has_official_dub": has_official_dub,
+        "needs_yandex_ai": needs_yandex_ai,
         "has_ru": has_ru,
-        "has_en": has_en,
-        "languages": list(languages_found)
+        "has_en": has_en
     }
 
-def is_premium_user(uid: int, username: str = "") -> bool:
-    if uid in PREMIUM_USERS:
-        return True
-    uname = (username or "").strip().lower().lstrip("@")
-    if uname and uname in PREMIUM_USERNAMES:
-        return True
-    if not uname:
-        try:
-            db.c.execute("SELECT username FROM users WHERE user_id=?", (uid,))
-            row = db.c.fetchone()
-            if row and row[0]:
-                uname = row[0].strip().lower().lstrip("@")
-        except Exception:
-            uname = ""
-    return bool(uname and uname in PREMIUM_USERNAMES)
+# ─────────────────────────────────────────────
+# КЛИЕНТ ЗАКАДРОВОГО ПЕРЕВОДА ЯНДЕКС (VOT-CLI)
+# ─────────────────────────────────────────────
+async def fetch_yandex_voiceover(youtube_url: str, duration: int, cancel_token=None) -> Optional[str]:
+    """
+    Получает русскую нейроозвучку («Живые голоса») через vot-cli-live.
+    Перехватывает готовую ссылку на MP3 и скачивает файл напрямую.
+    """
+    m_id = re.search(r'(?:v=|\.be/|/shorts/|^)([a-zA-Z0-9_-]{11})', youtube_url)
+    clean_url = f"https://www.youtube.com/watch?v={m_id.group(1)}" if m_id else youtube_url
 
-def is_admin(uid: int) -> bool:
-    return uid == OWNER_ID or uid in ADMIN_IDS or db.is_admin_in_db(uid)
+    term_log("🤖 YANDEX AI", f"Запрос перевода через vot-cli-live: {clean_url}", Colors.CYAN)
 
-def is_owner(uid: int) -> bool:
-    return uid == OWNER_ID
+    tmp_filename = f"ya_{random.getrandbits(32)}.mp3"
+    tmp_mp3 = os.path.join(DOWNLOAD_DIR, tmp_filename)
+
+    # Автопоиск vot-cli-live в Windows и Linux
+    vot_bin = shutil.which("vot-cli-live.cmd") or shutil.which("vot-cli-live") or shutil.which("vot-cli") or "vot-cli-live"
+
+    cmd = [
+        vot_bin,
+        clean_url
+    ]
+
+    loop = asyncio.get_running_loop()
+    try:
+        def _run():
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                shell=(os.name == 'nt'),
+                encoding="utf-8",
+                errors="replace"
+            )
+            return (res.stdout or "") + "\n" + (res.stderr or "")
+
+        output_text = await loop.run_in_executor(None, _run)
+
+        # Извлекаем ссылку на сгенерированный MP3 из вывода утилиты
+        m = re.search(r'(https://vtrans\.s3-private\.mds\.yandex\.net[^\s"\'\)]+)', output_text)
+        if not m:
+            m = re.search(r'(https://[^\s"\'\)]+vtrans[^\s"\'\)]+)', output_text)
+
+        if m:
+            audio_url = m.group(1).strip()
+            term_log("✅ YANDEX AI", f"Ссылка получена! Скачивание MP3: {audio_url[:55]}...", Colors.GREEN)
+
+            def _download():
+                req = urllib.request.Request(audio_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp, open(tmp_mp3, "wb") as f:
+                    f.write(resp.read())
+
+            await loop.run_in_executor(None, _download)
+
+            if os.path.exists(tmp_mp3) and os.path.getsize(tmp_mp3) > 1024:
+                term_log("✅ YANDEX AI", f"Русская озвучка сохранена: {tmp_filename}", Colors.GREEN)
+                return tmp_mp3
+
+        term_log("⚠️ YANDEX AI", "Не удалось найти ссылку на аудио в выводе vot-cli-live", Colors.YELLOW)
+
+    except Exception as e:
+        term_log("❌ YANDEX AI", f"Ошибка вызова vot-cli-live: {e}", Colors.RED)
+
+    return None
+
+
+def merge_yandex_audio(video_src: str, voice_mp3: str, video_dst: str, cancel_token=None) -> bool:
+    """
+    Сводит русскую озвучку с оригинальным видео через Direct Copy (без пережатия картинки):
+    Оригинальный звук приглушается до 18%, а сверху чисто звучит русский голос.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_src,
+        "-i", voice_mp3,
+        "-filter_complex",
+        "[0:a]volume=0.18[orig];[orig][1:a]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        video_dst
+    ]
+    ok, _ = run_ffmpeg(cmd, video_dst, cancel_token)
+    return ok
 
 # ─────────────────────────────────────────────
-# FFPROBE И FFMPEG
+# ДВИЖОК DIRECT COPY
 # ─────────────────────────────────────────────
 def probe(path: str) -> dict:
     result = {"width": 0, "height": 0, "duration": 0, "fps": 30, "vcodec": "", "acodec": ""}
@@ -675,77 +793,6 @@ def probe(path: str) -> dict:
         term_log("❌ FFPROBE", f"Ошибка анализа {path}: {e}", Colors.RED)
     return result
 
-BITRATES = {
-    "1080": {"target": "4500k", "max": "7000k", "buf": "14000k"},
-    "720":  {"target": "2800k", "max": "4500k", "buf": "9000k"},
-    "480":  {"target": "1200k", "max": "2000k", "buf": "4000k"},
-    "360":  {"target": "700k",  "max": "1200k", "buf": "2400k"},
-}
-
-def ffmpeg_transcode(src: str, dst: str, quality: str, encoder: str, fps: int = 30, vf: Optional[str] = None) -> List[str]:
-    cfg_key = quality if quality in BITRATES else "720"
-    cfg = BITRATES.get(cfg_key, BITRATES["720"])
-    gop = fps * 2
-    cmd = ["ffmpeg", "-y"]
-    if "amf" in encoder or "nvenc" in encoder:
-        cmd += ["-hwaccel", "d3d11va"]
-    cmd += ["-i", src]
-    if vf:
-        cmd += ["-vf", vf]
-    if "amf" in encoder:
-        cmd += [
-            "-c:v", "h264_amf",
-            "-rc", "vbr_peak",
-            "-b:v", cfg["target"], "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-quality", "balanced", "-profile:v", "high",
-            "-g", str(gop),
-            "-pix_fmt", "yuv420p",
-        ]
-    elif "nvenc" in encoder:
-        cmd += [
-            "-c:v", "h264_nvenc", "-rc", "vbr",
-            "-b:v", cfg["target"], "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-preset", "p5", "-tune", "hq", "-profile:v", "high",
-            "-spatial_aq", "1", "-temporal_aq", "1",
-            "-g", str(gop), "-bf", "3", "-pix_fmt", "yuv420p",
-        ]
-    elif "qsv" in encoder:
-        cmd += [
-            "-c:v", "h264_qsv",
-            "-b:v", cfg["target"], "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-preset", "medium", "-profile:v", "high",
-            "-g", str(gop), "-bf", "3", "-look_ahead", "1", "-pix_fmt", "yuv420p",
-        ]
-    else:
-        cmd += [
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
-            "-profile:v", "high", "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-            "-g", str(gop), "-bf", "3", "-pix_fmt", "yuv420p",
-        ]
-    cmd += [
-        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
-        "-movflags", "+faststart", dst
-    ]
-    return cmd
-
-def ffmpeg_cpu_fallback(src: str, dst: str, quality: str, fps: int = 30, vf: Optional[str] = None) -> List[str]:
-    cfg_key = quality if quality in BITRATES else "720"
-    cfg = BITRATES.get(cfg_key, BITRATES["720"])
-    gop = fps * 2
-    cmd = [
-        "ffmpeg", "-y", "-i", src,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-        "-profile", "high", "-maxrate", cfg["max"], "-bufsize", cfg["buf"],
-        "-g", str(gop), "-bf", "3", "-pix_fmt", "yuv420p",
-    ]
-    if vf:
-        cmd += ["-vf", vf]
-    cmd += [
-        "-c:a", "aac", "-b:a", "128k", "-ar", "44100",
-        "-movflags", "+faststart", dst,
-    ]
-    return cmd
-
 def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, str]:
     err_lines = []
     try:
@@ -758,8 +805,6 @@ def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, st
             errors="replace",
             bufsize=1
         )
-        
-        # Читаем stderr по мере поступления, чтобы буфер Windows (64 КБ) никогда не переполнялся и не вешал процесс
         while True:
             if cancel_token and cancel_token.cancelled:
                 p.terminate()
@@ -772,7 +817,7 @@ def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, st
             line = p.stderr.readline()
             if line:
                 err_lines.append(line)
-                if len(err_lines) > 60:
+                if len(err_lines) > 50:
                     err_lines.pop(0)
             elif p.poll() is not None:
                 break
@@ -795,9 +840,54 @@ def run_ffmpeg(cmd: List[str], output: str, cancel_token=None) -> Tuple[bool, st
         term_log("❌ FFMPEG FAIL", f"Код {returncode}: {err}", Colors.RED)
         return False, err
     return True, ""
+
+def process_video_direct(src: str, dst: str, cancel_token=None) -> Tuple[bool, str]:
+    info = probe(src)
+    if info["vcodec"] in ("h264", "avc1") and info["acodec"] in ("aac", "mp3"):
+        cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart", dst]
+    else:
+        cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", dst]
+    return run_ffmpeg(cmd, dst, cancel_token)
+
 # ─────────────────────────────────────────────
-# YT-DLP ОПЦИИ (ПОЛНЫЙ ПАРСИНГ HLS И DASH)
+# YT-DLP ЗАГРУЗЧИК
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# ОПРЕДЕЛЕНИЕ COOKIES (с проверкой свежести файла)
+# ─────────────────────────────────────────────
+def get_cookie_opts() -> dict:
+    """
+    Раньше экспортированный cookies.txt всегда имел приоритет над куками
+    из браузера — даже если он протух (например, после смены IP/VPN).
+    Из-за этого приходилось руками пересохранять файл после каждой смены сервера.
+    Теперь: если файл с куками старше COOKIE_MAX_AGE_HOURS, он игнорируется
+    и бот сам берёт свежие куки прямо из браузера (если BROWSER_COOKIES задан) —
+    так они всегда актуальны, без ручного экспорта.
+    """
+    candidates = []
+    if COOKIE_FILE:
+        candidates.append(COOKIE_FILE)
+    candidates.append("www.youtube.com_cookies.txt")
+    candidates.append("cookies.txt")
+
+    for path in candidates:
+        if path and os.path.exists(path):
+            age_hours = (time.time() - os.path.getmtime(path)) / 3600
+            if age_hours <= COOKIE_MAX_AGE_HOURS:
+                return {"cookiefile": path}
+            else:
+                term_log(
+                    "⚠️ COOKIES",
+                    f"Файл {path} устарел ({age_hours:.1f}ч > {COOKIE_MAX_AGE_HOURS}ч) — "
+                    f"пробую куки из браузера, если заданы",
+                    Colors.YELLOW
+                )
+
+    if BROWSER_COOKIES and BROWSER_COOKIES.lower() not in ("none", "false", "0", ""):
+        return {"cookiesfrombrowser": (BROWSER_COOKIES,)}
+
+    return {}
+
 def ytdlp_opts() -> dict:
     opts = {
         "quiet": True,
@@ -805,9 +895,8 @@ def ytdlp_opts() -> dict:
         "retries": 10,
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 4,
-        # Запрашиваем m3u8 и все внутренние клиенты YouTube, где живут дубляжи
         "extractor_args": {
-            "youtube": ["player_client=web,android,ios,mweb"]
+            "youtube": ["player_client=web,ios,mweb"]
         },
         "sleep_interval_requests": 1,
     }
@@ -817,25 +906,19 @@ def ytdlp_opts() -> dict:
     if USE_PROXY:
         opts["proxy"] = f"socks5://{PROXY_HOST}:{PROXY_PORT}"
 
-    if COOKIE_FILE and os.path.exists(COOKIE_FILE):
-        opts["cookiefile"] = COOKIE_FILE
-    elif os.path.exists("www.youtube.com_cookies.txt"):
-        opts["cookiefile"] = "www.youtube.com_cookies.txt"
-    elif os.path.exists("cookies.txt"):
-        opts["cookiefile"] = "cookies.txt"
-    elif BROWSER_COOKIES and BROWSER_COOKIES.lower() not in ["none", "false", "0", ""]:
-        opts["cookiesfrombrowser"] = (BROWSER_COOKIES,)
+    opts.update(get_cookie_opts())
     return opts
 
 def download_video(url: str, quality: str, user_id: int, video_id: str, lang: str = "orig", cancel_token=None) -> str:
     opts = ytdlp_opts()
+    opts["noplaylist"] = True
     if cancel_token:
         def hook(d):
             if cancel_token.cancelled:
                 raise ValueError("CANCELLED")
         opts["progress_hooks"] = [hook]
 
-    file_suffix = f"_{lang}" if lang in ("ru", "en") else ""
+    file_suffix = f"_{lang}" if lang in ("ru", "en", "ya") else ""
     opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}{file_suffix}.%(ext)s")
     opts["writethumbnail"] = True
     opts["merge_output_format"] = "mp4"
@@ -844,75 +927,63 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
     max_w_map = {1080: 1920, 720: 1280, 480: 854, 360: 640}
     max_w = max_w_map.get(q, 1280)
 
-    # 1. Если запрошен РУССКИЙ дубляж
     if lang == "ru":
-        opts["format_sort"] = [
-            "hasaud", "lang:ru", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"
-        ]
+        opts["format_sort"] = ["hasaud", "lang:ru", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"]
         opts["extractor_args"] = {
-            "youtube": ["player_client=web,android,ios,mweb", "lang=ru"]
+            "youtube": ["player_client=web,ios,mweb", "lang=ru"]
         }
         audio_priority = [
-            "bestaudio[language^=ru]",
-            "bestaudio[language*=ru]",
-            "bestaudio[format_note*=Russian]",
-            "bestaudio[format_note*=russian]",
-            "bestaudio[format_note*=русск]",
-            "bestaudio[format_id*=-ru]",
-            "bestaudio[format_id*=dubbed]",
-            "bestaudio[language_preference>0]",
-            "bestaudio"
+            "bestaudio[language^=ru]", "bestaudio[language*=ru]",
+            "bestaudio[format_note*=Russian]", "bestaudio[format_note*=русск]",
+            "bestaudio[format_id*=-ru]", "bestaudio[format_id*=dubbed]"
         ]
         candidates = []
         for a in audio_priority:
             candidates.append(f"bestvideo[height<={q}]+{a}")
             candidates.append(f"bestvideo[width<={max_w}]+{a}")
-        # Также поддерживаем готовые склеенные HLS форматы на русском языке
         candidates.append(f"best[language^=ru][height<={q}]")
         candidates.append(f"best[format_note*=Russian][height<={q}]")
-        candidates.append(f"best[height<={q}]")
+        candidates.append(f"bestvideo[height<={q}]+bestaudio")
         candidates.append("best")
         opts["format"] = "/".join(candidates)
-
-    # 2. Если запрошен АНГЛИЙСКИЙ оригинал/дубляж
     elif lang == "en":
-        opts["format_sort"] = [
-            "hasaud", "lang:en", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"
-        ]
+        opts["format_sort"] = ["hasaud", "lang:en", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"]
         opts["extractor_args"] = {
-            "youtube": ["player_client=web,android,ios,mweb", "lang=en"]
+            "youtube": ["player_client=web,ios,mweb", "lang=en"]
         }
         audio_priority = [
-            "bestaudio[language^=en]",
-            "bestaudio[language*=en]",
-            "bestaudio[format_note*=English]",
-            "bestaudio[format_note*=english]",
-            "bestaudio[format_note*=original]",
-            "bestaudio"
+            "bestaudio[language^=en]", "bestaudio[language*=en]",
+            "bestaudio[format_note*=English]", "bestaudio"
         ]
         candidates = []
         for a in audio_priority:
             candidates.append(f"bestvideo[height<={q}]+{a}")
             candidates.append(f"bestvideo[width<={max_w}]+{a}")
         candidates.append(f"best[language^=en][height<={q}]")
-        candidates.append(f"best[height<={q}]")
         candidates.append("best")
         opts["format"] = "/".join(candidates)
 
-    # 3. Для видео БЕЗ дубляжей (оригинальный авторский звук)
+# 3. Для видео БЕЗ дубляжей (ОРИГИНАЛЬНЫЙ ГОЛОС АВТОРА, исключаем чужой автодубляж)
     else:
+        # Приоритет: 1) явно помеченная original, 2) без дубляжей, 3) чистый поток автора
+        audio_orig = (
+            "ba[format_note*=original]/"
+            "ba[format_note!*=dubbed][format_note!*=auto-dub]/"
+            "ba[format_id=251]/ba[format_id=140]/"
+            "ba"
+        )
         opts["format_sort"] = [f"res:{q}", "fps", "codec:h264:vp9:av1", "size", "br"]
         candidates = [
-            f"bestvideo[height<={q}]+bestaudio",
-            f"bestvideo[width<={max_w}]+bestaudio",
-            f"best[height<={q}][ext=mp4]",
+            f"bestvideo[height<={q}]+{audio_orig}",
+            f"bestvideo[width<={max_w}]+{audio_orig}",
+            f"best[height<={q}][format_note*=original]",
             f"best[height<={q}]",
-            "bestvideo+bestaudio",
+            f"bestvideo+{audio_orig}",
             "best"
         ]
         opts["format"] = "/".join(candidates)
 
-    term_log("📥 YT-DLP", f"[{user_id}] Загрузка {video_id} ({q}p, дорожка: {lang.upper()})...", Colors.CYAN)
+    term_log("📥 YT-DLP", f"[{user_id}] Загрузка {video_id} ({q}p, аудио: {lang.upper()})...", Colors.CYAN)
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
@@ -926,6 +997,7 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
 
 def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", cancel_token=None) -> str:
     opts = ytdlp_opts()
+    opts["noplaylist"] = True
     if cancel_token:
         def hook(d):
             if cancel_token.cancelled:
@@ -937,33 +1009,22 @@ def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", canc
 
     if lang == "ru":
         opts["format_sort"] = ["lang:ru", "size", "br"]
-        opts["extractor_args"] = {
-            "youtube": ["player_client=web,android,ios,mweb", "lang=ru"]
-        }
-        opts["format"] = (
-            "bestaudio[language^=ru]/"
-            "bestaudio[language*=ru]/"
-            "bestaudio[format_note*=Russian]/"
-            "bestaudio[format_note*=russian]/"
-            "bestaudio[format_note*=русск]/"
-            "bestaudio[format_id*=-ru]/"
-            "bestaudio"
-        )
+        opts["format"] = "bestaudio[language^=ru]/bestaudio[format_note*=Russian]/bestaudio/best"
     elif lang == "en":
         opts["format_sort"] = ["lang:en", "size", "br"]
-        opts["extractor_args"] = {
-            "youtube": ["player_client=web,android,ios,mweb", "lang=en"]
-        }
-        opts["format"] = (
-            "bestaudio[language^=en]/"
-            "bestaudio[language*=en]/"
-            "bestaudio[format_note*=English]/"
-            "bestaudio[format_note*=english]/"
-            "bestaudio[format_note*=original]/"
-            "bestaudio"
-        )
+        opts["format"] = "bestaudio[language^=en]/bestaudio[format_note*=English]/bestaudio/best"
     else:
-        opts["format"] = "bestaudio/best"
+        opts["format_sort"] = ["size", "br"]
+        # Каскадный выбор: ищем original, отсекаем dubbed/auto-dub, берем чистый поток,
+        # и в самом конце — best (смешанный формат), чтобы FFmpeg мог извлечь звук
+        # даже если у видео нет отдельной audio-only дорожки (частый случай для
+        # архивов трансляций/премьер, отдаваемых только через HLS).
+        opts["format"] = (
+            "ba[format_note*=original]/"
+            "ba[format_note!*=dubbed][format_note!*=auto-dub]/"
+            "ba[format_id=251]/ba[format_id=140]/"
+            "ba/best"
+        )
 
     opts["postprocessors"] = [
         {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
@@ -979,75 +1040,6 @@ def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", canc
         raise FileNotFoundError("MP3 не найден")
     return path
 
-# ─────────────────────────────────────────────
-# ОБРАБОТКА ВИДЕО
-# ─────────────────────────────────────────────
-def process_video(url: str, quality: str, user_id: int, video_id: str, lang: str = "orig", cancel_token=None) -> Tuple[str, Optional[str], int]:
-    src = download_video(url, quality, user_id, video_id, lang=lang, cancel_token=cancel_token)
-    info = probe(src)
-    actual_tier = get_format_tier(info["width"], info["height"])
-    term_log(
-        "🔎 PROBE",
-        f"[{user_id}] {info['width']}x{info['height']} | V:{info['vcodec']} A:{info['acodec']} -> {actual_tier}p ({lang.upper()})",
-        Colors.MAGENTA
-    )
-
-    file_suffix = f"_{lang}" if lang in ("ru", "en") else ""
-    dst = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}{file_suffix}_out.mp4")
-    fps = info["fps"] or 30
-    target_q = int(quality) if str(quality).isdigit() else 720
-    src_long = max(info["width"], info["height"])
-    src_short = min(info["width"], info["height"])
-
-    max_w_map = {1080: 1920, 720: 1280, 480: 854, 360: 640}
-    max_w = max_w_map.get(target_q, 1280)
-    need_scale = bool(target_q and (src_short > target_q + 40 and src_long > max_w + 40))
-
-    vf = None
-    if need_scale:
-        if info["width"] >= info["height"]:
-            vf = f"scale=-2:{target_q}"
-        else:
-            vf = f"scale={target_q}:-2"
-
-    enc_quality = quality if str(quality).isdigit() else "720"
-
-    if info["vcodec"] == "h264" and info["acodec"] in ("aac", "mp3") and not need_scale:
-        term_log("⚡ FAST COPY", f"[{user_id}] Прямой проброс потоков...", Colors.GREEN)
-        cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart", dst]
-        ok, err = run_ffmpeg(cmd, dst, cancel_token)
-    elif info["vcodec"] == "h264" and not need_scale:
-        term_log("⚡ AUDIO FIX", f"[{user_id}] Перекодирование звука в AAC...", Colors.GREEN)
-        cmd = ["ffmpeg", "-y", "-i", src, "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-movflags", "+faststart", dst]
-        ok, err = run_ffmpeg(cmd, dst, cancel_token)
-    else:
-        term_log("⚙️ TRANSCODE", f"[{user_id}] Аппаратный рендер ({VIDEO_ENCODER})...", Colors.YELLOW)
-        ok, err = False, ""
-        if VIDEO_ENCODER != "libx264":
-            cmd = ffmpeg_transcode(src, dst, enc_quality, VIDEO_ENCODER, fps, vf=vf)
-            ok, err = run_ffmpeg(cmd, dst, cancel_token)
-        if not ok:
-            term_log("⚠️ FALLBACK", f"[{user_id}] Переключение на CPU libx264...", Colors.YELLOW)
-            if os.path.exists(dst):
-                try:
-                    os.remove(dst)
-                except Exception:
-                    pass
-            cmd = ffmpeg_cpu_fallback(src, dst, enc_quality, fps, vf=vf)
-            ok, err = run_ffmpeg(cmd, dst, cancel_token)
-
-    if not ok:
-        raise RuntimeError(f"FFmpeg ошибка: {err[-250:]}")
-
-    try:
-        os.remove(src)
-    except Exception:
-        pass
-
-    final_info = probe(dst)
-    final_tier = get_format_tier(final_info["width"], final_info["height"])
-    return dst, make_thumb(user_id, f"{video_id}{file_suffix}"), final_tier
-
 def make_thumb(user_id: int, file_key: str) -> Optional[str]:
     prefix = f"{user_id}_{file_key}."
     raw = None
@@ -1058,10 +1050,7 @@ def make_thumb(user_id: int, file_key: str) -> Optional[str]:
     if not raw:
         return None
     thumb = os.path.join(DOWNLOAD_DIR, f"{user_id}_{file_key}_thumb.jpg")
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", raw, "-vf", "scale=320:-1", "-q:v", "5", thumb],
-        capture_output=True
-    )
+    subprocess.run(["ffmpeg", "-y", "-i", raw, "-vf", "scale=320:-1", "-q:v", "5", thumb], capture_output=True)
     try:
         os.remove(raw)
     except Exception:
@@ -1114,6 +1103,92 @@ async def upload_file(client: TelegramClient, path: str, progress_cb=None, cance
     return types.InputFileBig(id=file_id, parts=parts, name=os.path.basename(path))
 
 # ─────────────────────────────────────────────
+# КЛАВИАТУРЫ (REPLY И INLINE)
+# ─────────────────────────────────────────────
+def get_reply_keyboard(uid: int):
+    """Постоянное Reply-меню (кнопки внизу экрана)"""
+    if is_admin(uid):
+        return [
+            [Button.text("👑 Админ-панель", resize=True), Button.text("⚡ Кэш роликов")],
+            [Button.text("💎 Белый список (4 ГБ)"), Button.text("👥 Пользователи")],
+            [Button.text("📜 Список команд"), Button.text("📊 Статистика")]
+        ]
+    return [
+        [Button.text("ℹ️ О боте и лимитах", resize=True), Button.text("❓ Как пользоваться")],
+        [Button.text("📊 Моя статистика")]
+    ]
+
+def make_video_keyboard(vid: str, current_lang: str = "orig", is_playlist: bool = False) -> List[List[Button]]:
+    meta = video_meta.get(vid, {})
+    tiers = meta.get("tiers", [1080, 720, 480, 360])
+    duration = meta.get("duration", 0)
+    audio_info = meta.get("audio_info", {})
+
+    buttons = []
+
+    # 1. Плейлист
+    if is_playlist:
+        if audio_info.get("needs_yandex_ai"):
+            ya_mark = "✅ " if current_lang == "ya" else ""
+            orig_mark = "✅ " if current_lang == "orig" else ""
+            buttons.append([
+                Button.inline(f"{ya_mark}🤖 Перевод Яндекс", f"pllang:ya:{vid}".encode()),
+                Button.inline(f"{orig_mark}🇬🇧 Оригинал", f"pllang:orig:{vid}".encode())
+            ])
+        elif audio_info.get("has_official_dub"):
+            ru_mark = "✅ " if current_lang == "ru" else ""
+            en_mark = "✅ " if current_lang == "en" else ""
+            buttons.append([
+                Button.inline(f"{ru_mark}🇷🇺 Дубляж", f"pllang:ru:{vid}".encode()),
+                Button.inline(f"{en_mark}🇬🇧 Оригинал", f"pllang:en:{vid}".encode())
+            ])
+
+        buttons.append([
+            Button.inline("⚡ 1080p", f"pl:3:1080:{vid}:{current_lang}".encode()),
+            Button.inline("⚡ 720p", f"pl:3:720:{vid}:{current_lang}".encode())
+        ])
+        buttons.append([
+            Button.inline("⚡ 480p", f"pl:3:480:{vid}:{current_lang}".encode()),
+            Button.inline("⚡ 360p", f"pl:3:360:{vid}:{current_lang}".encode())
+        ])
+        buttons.append([Button.inline("🎵 Весь плейлист в MP3", f"pl:3:mp3:{vid}:{current_lang}".encode())])
+        return buttons
+
+    # 2. Обычное видео
+    if audio_info.get("has_official_dub"):
+        ru_mark = "✅ " if current_lang == "ru" else ""
+        en_mark = "✅ " if current_lang == "en" else ""
+        buttons.append([
+            Button.inline(f"{ru_mark}🇷🇺 Дубляж", f"lang:ru:{vid}".encode()),
+            Button.inline(f"{en_mark}🇬🇧 Оригинал", f"lang:en:{vid}".encode())
+        ])
+    elif audio_info.get("needs_yandex_ai"):
+        ya_mark = "✅ " if current_lang == "ya" else ""
+        orig_mark = "✅ " if current_lang == "orig" else ""
+        buttons.append([
+            Button.inline(f"{ya_mark}🤖 Перевод Яндекс", f"lang:ya:{vid}".encode()),
+            Button.inline(f"{orig_mark}🇬🇧 Оригинал", f"lang:orig:{vid}".encode())
+        ])
+
+    row = []
+    for t in tiers:
+        has_cached = bool(db.get_cache(vid, str(t), lang=current_lang))
+        icon = "⚡" if has_cached else "🎬"
+        est_mb = estimate_size_mb(duration, t)
+        row.append(Button.inline(f"{icon} {t}p (~{est_mb} МБ)", f"dl:{t}:{vid}:{current_lang}".encode()))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+
+    mp3_cached = bool(db.get_cache(vid, "mp3", lang=current_lang))
+    mp3_icon = "⚡" if mp3_cached else "🎵"
+    mp3_mb = max(1, int((192 * max(duration, 1)) / (8 * 1024)))
+    buttons.append([Button.inline(f"{mp3_icon} Скачать MP3 (~{mp3_mb} МБ)", f"dl:mp3:{vid}:{current_lang}".encode())])
+    return buttons
+
+# ─────────────────────────────────────────────
 # СОСТОЯНИЕ БОТА И ТОКЕНЫ
 # ─────────────────────────────────────────────
 bot: Optional[TelegramClient] = None
@@ -1132,56 +1207,6 @@ class CancelToken:
 
 cancel_tokens: Dict[str, CancelToken] = {}
 
-def make_video_keyboard(vid: str, current_lang: str = "orig", is_playlist: bool = False) -> List[List[Button]]:
-    meta = video_meta.get(vid, {})
-    tiers = meta.get("tiers", [1080, 720, 480, 360])
-    is_multi = meta.get("is_multiaudio", False)
-
-    buttons = []
-
-    # Добавляем кнопки выбора языков ТОЛЬКО ЕСЛИ реально найден дубляж
-    if is_multi:
-        ru_mark = "✅ " if current_lang == "ru" else ""
-        en_mark = "✅ " if current_lang == "en" else ""
-        if is_playlist:
-            buttons.append([
-                Button.inline(f"{ru_mark}🇷🇺 Русский", f"pllang:ru:{vid}".encode()),
-                Button.inline(f"{en_mark}🇬🇧 English", f"pllang:en:{vid}".encode())
-            ])
-        else:
-            buttons.append([
-                Button.inline(f"{ru_mark}🇷🇺 Русский", f"lang:ru:{vid}".encode()),
-                Button.inline(f"{en_mark}🇬🇧 English", f"lang:en:{vid}".encode())
-            ])
-
-    # Кнопки качества
-    if is_playlist:
-        buttons.append([
-            Button.inline("⚡ 1080p", f"pl:3:1080:{vid}:{current_lang}".encode()),
-            Button.inline("⚡ 720p", f"pl:3:720:{vid}:{current_lang}".encode())
-        ])
-        buttons.append([
-            Button.inline("⚡ 480p", f"pl:3:480:{vid}:{current_lang}".encode()),
-            Button.inline("⚡ 360p", f"pl:3:360:{vid}:{current_lang}".encode())
-        ])
-        return buttons
-
-    row = []
-    for t in tiers:
-        has_cached = bool(db.get_cache(vid, str(t), lang=current_lang))
-        icon = "⚡" if has_cached else "🎬"
-        row.append(Button.inline(f"{icon} {t}p", f"dl:{t}:{vid}:{current_lang}".encode()))
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-
-    mp3_cached = bool(db.get_cache(vid, "mp3", lang=current_lang))
-    mp3_icon = "⚡" if mp3_cached else "🎵"
-    buttons.append([Button.inline(f"{mp3_icon} Скачать MP3 (Аудио)", f"dl:mp3:{vid}:{current_lang}".encode())])
-    return buttons
-
 # ═══════════════════════════════════════════════
 # ХЕНДЛЕРЫ TELEGRAM
 # ═══════════════════════════════════════════════
@@ -1195,21 +1220,79 @@ def setup_handlers(client: TelegramClient):
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/start(?:\s+.*)?$", re.IGNORECASE)))
     async def cmd_start(event):
-        db.register_user(event.sender_id, event.sender.username or "")
-        limit = "4 ГБ 💎" if is_premium else "2 ГБ"
-        term_log("👋 USER", f"Пользователь {event.sender_id} (@{event.sender.username or 'none'}) нажал /start", Colors.BLUE)
+        db.register_user(event.sender_id, getattr(event.sender, "username", "") or "")
+        limit = "4 ГБ 💎" if (is_premium_user(event.sender_id) and is_premium) else "2 ГБ"
+        term_log("👋 USER", f"Пользователь {event.sender_id} нажал /start", Colors.BLUE)
         await event.respond(
             "👋 **Привет! Я YouTube Monster Bot.**\n\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "💬 **Как пользоваться:**\n"
             "1️⃣ Отправь ссылку на ролик YouTube / Shorts / плейлист\n"
-            "2️⃣ Если у видео есть дубляж (Mark Rober, MrBeast или AI-перевод) — появится выбор озвучки (RU/EN)\n"
-            "3️⃣ Выбери качество видео кнопками\n"
-            "4️⃣ Получи файл прямо в Telegram!\n\n"
-            "⚡ **Кэш V2** — мгновенная отдача роликов без повторного скачивания\n"
+            "2️⃣ Выбери качество кнопками (размер файла указан рядом)\n"
+            "3️⃣ Если ролик на английском — доступен нейроперевод Яндекс\n"
+            "4️⃣ Мгновенная доставка прямо в чат!\n\n"
+            "⚡ **Direct Copy** — скачивание без рендера за 1-2 секунды\n"
             f"🛡 **Максимальный размер:** {limit}\n"
-            "━━━━━━━━━━━━━━━━━━━━"
+            "━━━━━━━━━━━━━━━━━━━━",
+            buttons=get_reply_keyboard(event.sender_id)
         )
+
+    # ─────────────────────────────────────────
+    # ОБРАБОТКА REPLY-МЕНЮ (НИЖНИЕ КНОПКИ)
+    # ─────────────────────────────────────────
+    @client.on(events.NewMessage(func=lambda e: e.text in (
+        "👑 Админ-панель", "⚡ Кэш роликов", "💎 Белый список (4 ГБ)",
+        "👥 Пользователи", "📜 Список команд", "📊 Статистика",
+        "ℹ️ О боте и лимитах", "❓ Как пользоваться", "📊 Моя статистика"
+    )))
+    async def on_reply_menu_click(event):
+        txt = event.text
+        uid = event.sender_id
+
+        if txt == "👑 Админ-панель":
+            await cmd_admin(event)
+        elif txt == "⚡ Кэш роликов":
+            await cmd_cache(event)
+        elif txt == "💎 Белый список (4 ГБ)":
+            await cmd_whitelist(event)
+        elif txt == "👥 Пользователи":
+            await cmd_users(event)
+        elif txt == "📜 Список команд":
+            await cmd_commands(event)
+        elif txt == "📊 Статистика":
+            s = db.stats()
+            await event.respond(
+                f"📊 **СТАТИСТИКА БОТА**\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"👥 Всего пользователей: `{s['users']}`\n"
+                f"🎬 Скачано роликов: `{s['videos']}`\n"
+                f"💾 Всего трафика: `{s['gb']:.2f} ГБ`\n"
+                f"⚡ Файлов в локальном кэше: `{s['cache']}`"
+            )
+        elif txt == "ℹ️ О боте и лимитах":
+            limit = "4 ГБ 💎" if (is_premium_user(uid) and is_premium) else "2 ГБ"
+            await event.respond(
+                f"ℹ️ **О СЕРВИСЕ И ЛИМИТАХ**\n\n"
+                f"🛡 Ваш текущий лимит на файл: **{limit}**\n"
+                f"🚀 Движок: Direct Copy (без пережатия видео)\n"
+                f"⚡ Кэш: ранее скачанные ролики отдаются за 0.1 сек\n"
+                f"🤖 Поддержка нейроперевода Яндекс для зарубежных видео."
+            )
+        elif txt == "❓ Как пользоваться":
+            await event.respond(
+                "💬 **ИНСТРУКЦИЯ:**\n\n"
+                "1. Скопируйте ссылку на видео, Shorts или плейлист с YouTube.\n"
+                "2. Отправьте её боту сообщением.\n"
+                "3. Нажмите на инлайн-кнопку с желаемым качеством.\n"
+                "Бот подготовит файл и пришлёт его прямо в этот диалог!"
+            )
+        elif txt == "📊 Моя статистика":
+            vids, mb = db.get_user_stats(uid)
+            await event.respond(
+                f"📊 **ВАША АКТИВНОСТЬ:**\n\n"
+                f"🎬 Скачано роликов: `{vids}`\n"
+                f"💾 Загружено трафика: `{mb / 1024:.2f} ГБ` ({mb:.0f} МБ)"
+            )
 
     # ─────────────────────────────────────────
     # ПАНЕЛЬ АДМИНИСТРАТОРА И СПИСОК КОМАНД
@@ -1225,7 +1308,7 @@ def setup_handlers(client: TelegramClient):
         "🔧 <b>Команды Администратора:</b>\n"
         "• <code>/admin</code> — открыть интерактивную админ-панель\n"
         "• <code>/commands</code> или <code>/help</code> — этот список команд\n"
-        "• <code>/cache</code> — интерактивное управление кэшем (пагинация + просмотр + удаление)\n"
+        "• <code>/cache [номер]</code> — управление кэшем (новые сверху, переход по цифре)\n"
         "• <code>/cache &lt;запрос&gt;</code> — поиск по названию или ID в кэше\n"
         "• <code>/users</code> — список последних 50 пользователей\n"
         "• <code>/admins</code> — список действующих администраторов\n"
@@ -1236,8 +1319,7 @@ def setup_handlers(client: TelegramClient):
         "• <code>/unban &lt;ID|@username&gt;</code> — разблокировать пользователя\n"
         "• <code>/broadcast &lt;текст&gt;</code> — массовая рассылка\n\n"
         "👤 <b>Пользовательские:</b>\n"
-        "• <code>/start</code> — перезапуск бота и приветствие\n"
-        "• Ссылка на YouTube — анализ, выбор качества и скачивание"
+        "• <code>/start</code> — перезапуск бота и меню"
     )
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/(?:commands|help)(?:@\w+)?(?:\s+.*)?$", re.IGNORECASE)))
@@ -1266,7 +1348,7 @@ def setup_handlers(client: TelegramClient):
             f"💾 Всего трафика: `{s['gb']:.2f} ГБ`\n"
             f"⚡ Роликов в кэше: `{s['cache']}`\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚙️ Видеокодек: `{VIDEO_ENCODER}` (AMD RX 6600)\n"
+            f"🚀 Движок: `Direct Copy` (0% CPU)\n"
             f"💎 Premium контур: `{'Включен (4 ГБ)' if is_premium else 'Стандарт (2 ГБ)'}`\n"
             f"👑 Владелец: `{OWNER_ID}`\n"
             f"🔧 Доп. админов: `{len(ADMIN_IDS)}`",
@@ -1333,7 +1415,7 @@ def setup_handlers(client: TelegramClient):
         await event.respond(f"🗑 Пользователь {user_link(uid, uname)} снят с должности администратора.", parse_mode="html")
 
     # ─────────────────────────────────────────
-    # УПРАВЛЕНИЕ КЭШЕМ
+    # УПРАВЛЕНИЕ КЭШЕМ (СВЕЖИЕ СВЕРХУ)
     # ─────────────────────────────────────────
     def format_cache_item(vid: str, q_key: str, title: str, dt) -> Tuple[str, str]:
         t_clean = (title or "").strip()
@@ -1342,7 +1424,7 @@ def setup_handlers(client: TelegramClient):
 
         if "_" in str(q_key):
             res_part, lang_part = q_key.split("_", 1)
-            flag = "🇷🇺" if lang_part == "ru" else "🇬🇧"
+            flag = "🇷🇺" if lang_part == "ru" else ("🤖" if lang_part == "ya" else "🇬🇧")
             label = f"{res_part}p [{flag} {lang_part.upper()}]"
         else:
             label = f"{q_key}p [Оригинал]"
@@ -1351,7 +1433,12 @@ def setup_handlers(client: TelegramClient):
     async def render_cache_page(event, page: int = 1):
         items, total = db.get_cache_page(page, page_size=5)
         max_page = max(1, math.ceil(total / 5))
-        page = max(1, min(page, max_page))
+
+        if page > max_page or page < 1:
+            err_text = f"❌ **Страницы `{page}` не существует!**\nВсего доступно страниц: **от 1 до {max_page}**."
+            if isinstance(event, events.CallbackQuery.Event):
+                return await event.answer(f"Страницы {page} нет! Всего: 1-{max_page}", alert=True)
+            return await event.respond(err_text)
 
         if not items:
             text = "⚡ **Кэш видео пуст.**"
@@ -1360,12 +1447,17 @@ def setup_handlers(client: TelegramClient):
                 return await event.edit(text, buttons=kb)
             return await event.respond(text, buttons=kb)
 
-        lines = [f"⚡ **УПРАВЛЕНИЕ КЭШЕМ** (Стр. `{page}/{max_page}` | Всего: `{total}`)\n━━━━━━━━━━━━━━━━━━━━"]
+        lines = [
+            f"⚡ **КЭШ РОЛИКОВ** (Стр. `{page}/{max_page}` | Всего: `{total}`)\n"
+            f"📌 *Свежие ролики всегда отображаются первыми в списке!*\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        ]
         buttons = []
 
-        for vid, q_key, title, dt, file_id in items:
+        start_num = (page - 1) * 5 + 1
+        for idx, (vid, q_key, title, dt, file_id) in enumerate(items, start=start_num):
             t_clean, label = format_cache_item(vid, q_key, title, dt)
-            lines.append(f"🎬 **{t_clean[:40]}**\n   └ ID: `{vid}` | {label} | 📅 `{str(dt)[:10]}`")
+            lines.append(f"<b>#{idx}</b> 🎬 <b>{t_clean[:38]}</b>\n   └ ID: <code>{vid}</code> | {label}")
             row = [Button.inline("🎬 Отправить", f"cview:{vid}:{q_key}".encode())]
             if check_owner(event.sender_id):
                 row.append(Button.inline("🗑 Удалить", f"cdel:{vid}:{q_key}:{page}".encode()))
@@ -1385,18 +1477,28 @@ def setup_handlers(client: TelegramClient):
         bottom_row.append(Button.inline("🔙 В админку", b"adm:panel"))
         buttons.append(bottom_row)
 
-        msg_text = "\n".join(lines) + "\n━━━━━━━━━━━━━━━━━━━━\n💡 *Нажмите «🎬 Отправить», чтобы отправить видео из кэша себе в чат.*"
+        msg_text = (
+            "\n".join(lines) + 
+            "\n━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 *Для перехода напишите:* `/cache <номер_страницы>`"
+        )
 
         if isinstance(event, events.CallbackQuery.Event):
-            await event.edit(msg_text, buttons=buttons)
+            await event.edit(msg_text, buttons=buttons, parse_mode="html")
         else:
-            await event.respond(msg_text, buttons=buttons)
+            await event.respond(msg_text, buttons=buttons, parse_mode="html")
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/cache(?:@\w+)?(?:\s+(.+))?$", re.IGNORECASE)))
     async def cmd_cache(event):
         if not check_admin(event.sender_id):
             return await event.respond("❌ Недостаточно прав.")
-        query = event.pattern_match.group(1)
+        
+        query = event.pattern_match.group(1) if getattr(event, 'pattern_match', None) else None
+
+        if query and query.strip().isdigit():
+            target_page = int(query.strip())
+            return await render_cache_page(event, page=target_page)
+
         if query:
             q_clean = query.strip()
             results = db.search_cache(q_clean, limit=10)
@@ -1415,7 +1517,6 @@ def setup_handlers(client: TelegramClient):
         else:
             await render_cache_page(event, page=1)
 
-    # Отправка из кэша (cview)
     @client.on(events.CallbackQuery(pattern=b"^cview:"))
     async def cb_cache_view_video(event):
         if not check_admin(event.sender_id):
@@ -1431,22 +1532,17 @@ def setup_handlers(client: TelegramClient):
         cache_data = db.get_cache(vid, quality, lang=lang)
 
         if not cache_data:
-            term_log("⚠️ CVIEW FAIL", f"Файл {vid} ({q_key}) не найден в bot.db!", Colors.YELLOW)
             return await event.answer("⚠️ Файл не найден в базе кэша.", alert=True)
 
         file_id, title = cache_data
         await event.answer("🚀 Отправляю видео из кэша...")
-        term_log("⚡ CVIEW", f"Администратор {event.sender_id} запросил просмотр из кэша: {vid} [{q_key}]", Colors.GREEN)
+        term_log("⚡ CVIEW", f"Просмотр из кэша: {vid} [{q_key}]", Colors.GREEN)
 
         try:
-            if lang in ("ru", "en"):
-                flag = "🇷🇺 RU" if lang == "ru" else "🇬🇧 EN"
-                caption = f"🎬 <b>{title or vid}</b> [{flag} {quality}p]\n⚡ <i>Отправлено напрямую из базы кэша</i>"
-            else:
-                caption = f"🎬 <b>{title or vid}</b> [{quality}p]\n⚡ <i>Отправлено напрямую из базы кэша</i>"
+            flag = "🇷🇺 RU" if lang == "ru" else ("🤖 YANDEX AI" if lang == "ya" else "🇬🇧 EN")
+            caption = f"🎬 <b>{title or vid}</b> [{flag} {quality}p]\n⚡ <i>Отправлено напрямую из базы кэша</i>"
             await client.send_file(event.sender_id, file_id, caption=caption, parse_mode="html")
         except Exception as e:
-            term_log("❌ CVIEW ERROR", f"Ошибка отправки файла из кэша: {e}", Colors.RED)
             await event.respond(f"❌ Ошибка отправки из кэша:\n`{e}`")
 
     @client.on(events.CallbackQuery(pattern=b"^adm:cache:"))
@@ -1476,11 +1572,10 @@ def setup_handlers(client: TelegramClient):
         if not check_owner(event.sender_id):
             return await event.answer("⛔ Только ВЛАДЕЛЕЦ может очищать кэш!", alert=True)
         count = db.clear_all_cache()
-        term_log("💥 CACHE PURGE", f"Владелец ПОЛНОСТЬЮ очистил кэш ({count} записей)", Colors.RED)
+        term_log("💥 CACHE PURGE", f"Владелец очистил весь кэш ({count} записей)", Colors.RED)
         await event.answer("✅ Весь кэш успешно удален!", alert=True)
         await render_cache_page(event, page=1)
 
-    # Удаление из кэша (cdel)
     @client.on(events.CallbackQuery(pattern=b"^cdel:"))
     async def cb_del_cache_item(event):
         if not check_owner(event.sender_id):
@@ -1496,10 +1591,9 @@ def setup_handlers(client: TelegramClient):
         cleaned_files = cleanup_disk_for_video(vid)
 
         if deleted_rows > 0 or cleaned_files > 0:
-            term_log("🗑️ CACHE DEL", f"Владелец удалил из кэша {vid} [{q_key}]. Записей: {deleted_rows}, файлов с диска: {cleaned_files}", Colors.GREEN)
+            term_log("🗑️ CACHE DEL", f"Удалено из кэша {vid} [{q_key}] (БД: {deleted_rows}, Диск: {cleaned_files})", Colors.GREEN)
             await event.answer(f"✅ Удалено: {vid} [{q_key}]", alert=False)
         else:
-            term_log("⚠️ CACHE DEL", f"Запись {vid} [{q_key}] отсутствовала в кэше", Colors.YELLOW)
             await event.answer("⚠️ Запись уже удалена из кэша.", alert=True)
 
         await render_cache_page(event, page)
@@ -1513,18 +1607,18 @@ def setup_handlers(client: TelegramClient):
         target = f"{q}" if q else ""
         deleted = db.del_cache(vid, target)
         cleaned = cleanup_disk_for_video(vid)
-        term_log("🗑️ MANUAL DELCACHE", f"Владелец удалил {vid}: {deleted} записей БД, {cleaned} файлов с диска", Colors.GREEN)
+        term_log("🗑️ MANUAL DELCACHE", f"Удалено {vid}: {deleted} записей, {cleaned} файлов с диска", Colors.GREEN)
         if deleted or cleaned:
             await event.respond(f"✅ Видео `{vid}` успешно удалено из кэша и диска.")
         else:
-            await event.respond(f"⚠️ Видео `{vid}` не найдено в базе кэша.")
+            await event.respond(f"⚠️ Видео `{vid}` не найдено в кэше.")
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/clearcache(?:@\w+)?$", re.IGNORECASE)))
     async def cmd_clearcache_manual(event):
         if not check_owner(event.sender_id):
             return await event.respond("❌ Только владелец бота может очищать кэш.")
         count = db.clear_all_cache()
-        term_log("💥 CACHE PURGE", f"Владелец очистил кэш через команду ({count} записей)", Colors.RED)
+        term_log("💥 CACHE PURGE", f"Владелец очистил кэш ({count} записей)", Colors.RED)
         await event.respond(f"✅ Кэш полностью очищен ({count} записей удалено).")
 
     # ─────────────────────────────────────────
@@ -1550,7 +1644,7 @@ def setup_handlers(client: TelegramClient):
             f"💾 Всего трафика: `{s['gb']:.2f} ГБ`\n"
             f"⚡ Роликов в кэше: `{s['cache']}`\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚙️ Видеокодек: `{VIDEO_ENCODER}` (AMD RX 6600)\n"
+            f"🚀 Движок: `Direct Copy` (0% CPU)\n"
             f"💎 Premium контур: `{'Включен (4 ГБ)' if is_premium else 'Стандарт (2 ГБ)'}`\n"
             f"👑 Владелец: `{OWNER_ID}`\n"
             f"🔧 Доп. админов: `{len(ADMIN_IDS)}`",
@@ -1642,7 +1736,7 @@ def setup_handlers(client: TelegramClient):
         if uname:
             PREMIUM_USERNAMES.add(uname)
         save_premium_list()
-        term_log("💎 PREM ADD", f"[{event.sender_id}] Добавлен в whitelist: {uid} (@{uname})", Colors.GREEN)
+        term_log("💎 PREM ADD", f"Добавлен в whitelist: {uid} (@{uname})", Colors.GREEN)
         await event.respond(f"✅ Пользователь {user_link(uid, uname)} добавлен в белый список (4 ГБ).", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/delpremium(?:@\w+)?\s+(.+)$", re.IGNORECASE)))
@@ -1658,7 +1752,7 @@ def setup_handlers(client: TelegramClient):
         if uname:
             PREMIUM_USERNAMES.discard(uname)
         save_premium_list()
-        term_log("🗑️ PREM DEL", f"[{event.sender_id}] Удален из whitelist: {uid}", Colors.YELLOW)
+        term_log("🗑️ PREM DEL", f"Удален из whitelist: {uid}", Colors.YELLOW)
         await event.respond(f"🗑 Пользователь {user_link(uid, uname)} удален из белого списка.", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/ban(?:@\w+)?\s+(.+)$", re.IGNORECASE)))
@@ -1676,7 +1770,7 @@ def setup_handlers(client: TelegramClient):
             return await event.respond("❌ Только владелец может банить администраторов.")
 
         db.set_ban(uid, True)
-        term_log("⛔ BAN", f"Администратор {event.sender_id} заблокировал {uid}", Colors.RED)
+        term_log("⛔ BAN", f"Заблокирован пользователь {uid}", Colors.RED)
         await event.respond(f"⛔ Пользователь {user_link(uid, uname)} заблокирован.", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/unban(?:@\w+)?\s+(.+)$", re.IGNORECASE)))
@@ -1689,7 +1783,7 @@ def setup_handlers(client: TelegramClient):
             return await event.respond(err)
 
         db.set_ban(uid, False)
-        term_log("✅ UNBAN", f"Администратор {event.sender_id} разблокировал {uid}", Colors.GREEN)
+        term_log("✅ UNBAN", f"Разблокирован пользователь {uid}", Colors.GREEN)
         await event.respond(f"✅ Пользователь {user_link(uid, uname)} разблокирован.", parse_mode="html")
 
     @client.on(events.NewMessage(pattern=re.compile(r"^/broadcast(?:@\w+)?\s+(.+)", re.IGNORECASE)))
@@ -1700,7 +1794,7 @@ def setup_handlers(client: TelegramClient):
         users = db.all_users()
         ok = 0
         status_msg = await event.respond(f"📣 Начинаю рассылку для {len(users)} пользователей...")
-        term_log("📢 BROADCAST", f"Админ {event.sender_id} запустил рассылку...", Colors.CYAN)
+        term_log("📢 BROADCAST", f"Админ запустил рассылку...", Colors.CYAN)
         for uid in users:
             try:
                 await client.send_message(uid, f"🔔 **Оповещение от администрации:**\n\n{text}")
@@ -1712,7 +1806,7 @@ def setup_handlers(client: TelegramClient):
         await status_msg.edit(f"✅ Рассылка завершена! Доставлено: `{ok}/{len(users)}` пользователям.")
 
     # ─────────────────────────────────────────
-    # ПЕРЕКЛЮЧАТЕЛЬ ОЗВУЧКИ (ИНЛАЙН RU/EN)
+    # ПЕРЕКЛЮЧАТЕЛЬ ОЗВУЧКИ (ИНЛАЙН)
     # ─────────────────────────────────────────
     @client.on(events.CallbackQuery(pattern=b"^lang:"))
     async def on_switch_lang(event):
@@ -1728,22 +1822,31 @@ def setup_handlers(client: TelegramClient):
         meta["selected_lang"] = new_lang
         kb = make_video_keyboard(vid, current_lang=new_lang, is_playlist=False)
 
-        lang_name = "🇷🇺 Русский" if new_lang == "ru" else "🇬🇧 English"
+        if new_lang == "ru":
+            lang_name = "🇷🇺 Дубляж"
+        elif new_lang == "ya":
+            lang_name = "🤖 Перевод Яндекс"
+        else:
+            lang_name = "🇬🇧 Оригинал"
+
         kind = "📱 Shorts" if meta.get("is_short") else "🎥 Видео"
 
-        await event.edit(
-            f"🎥 **{meta['title']}**\n"
+        msg_text = f"🎥 **{meta['title']}**\n"
+        if meta.get("translated_title"):
+            msg_text += f"🇷🇺 *{meta['translated_title']}*\n"
+        msg_text += (
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 Автор: {hashtag(meta['uploader'])}\n"
             f"⏱ Длительность: `{timedelta(seconds=meta['duration'])}`\n"
-            f"📐 Максимальное качество: `{meta['max_quality']}p`\n"
+            f"📐 Макс. качество: `{meta['max_quality']}p`\n"
             f"🧬 Формат: `{kind}`\n"
-            f"🔊 Выбранная озвучка: **{lang_name}**\n"
+            f"🔊 Выбрано: **{lang_name}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👇 *Выберите качество для загрузки:*",
-            buttons=kb
+            f"👇 *Выберите качество для загрузки:*"
         )
-        await event.answer(f"Выбрана озвучка: {lang_name}")
+
+        await event.edit(msg_text, buttons=kb)
+        await event.answer(f"Выбрано: {lang_name}")
 
     @client.on(events.CallbackQuery(pattern=b"^pllang:"))
     async def on_switch_pl_lang(event):
@@ -1758,29 +1861,35 @@ def setup_handlers(client: TelegramClient):
 
         meta["selected_lang"] = new_lang
         kb = make_video_keyboard(pl_id, current_lang=new_lang, is_playlist=True)
-        lang_name = "🇷🇺 Русский" if new_lang == "ru" else "🇬🇧 English"
+
+        if new_lang == "ru":
+            lang_name = "🇷🇺 Дубляж"
+        elif new_lang == "ya":
+            lang_name = "🤖 Перевод Яндекс"
+        else:
+            lang_name = "🇬🇧 Оригинал"
 
         await event.edit(
             f"📚 **{meta['title']}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 Автор: {hashtag(meta.get('uploader', ''))}\n"
             f"🎞 Роликов: `{len(meta['ids'])}`\n"
-            f"🔊 Выбранная озвучка: **{lang_name}**\n"
+            f"🔊 Выбранный режим: **{lang_name}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"👇 *Выберите качество для скачивания плейлиста:*",
+            f"👇 *Выберите качество для плейлиста:*",
             buttons=kb
         )
-        await event.answer(f"Озвучка плейлиста: {lang_name}")
+        await event.answer(f"Режим: {lang_name}")
 
     # ─────────────────────────────────────────
-    # ОБРАБОТКА ССЫЛОК И ПЛЕЙЛИСТОВ
+    # ОБРАБОТКА ССЫЛОК YOUTUBE
     # ─────────────────────────────────────────
     @client.on(events.NewMessage(
         func=lambda e: bool(e.text) and not e.text.startswith("/") and bool(extract_url(e.text))))
     async def on_link(event):
         if db.is_banned(event.sender_id):
             return await event.respond("❌ Ваш аккаунт заблокирован в боте.")
-        db.register_user(event.sender_id, event.sender.username or "")
+        db.register_user(event.sender_id, getattr(event.sender, "username", "") or "")
         url = extract_url(event.text)
         uid = event.sender_id
 
@@ -1799,22 +1908,26 @@ def setup_handlers(client: TelegramClient):
                     return await msg.edit("❌ Плейлист пуст или скрыт настройками приватности.")
                 pl_id = info.get("id", f"pl_{random.getrandbits(32)}")
                 pl_title = info.get("title") or "Плейлист YouTube"
+
+                audio_info = detect_audio_tracks(info)
+                selected_lang = "orig"
+
                 video_meta[pl_id] = {
                     "title": pl_title,
                     "uploader": info.get("uploader", "Unknown"),
                     "is_playlist": True,
                     "ids": ids,
-                    "is_multiaudio": False,
-                    "selected_lang": "orig"
+                    "audio_info": audio_info,
+                    "selected_lang": selected_lang
                 }
-                kb = make_video_keyboard(pl_id, current_lang="orig", is_playlist=True)
+                kb = make_video_keyboard(pl_id, current_lang=selected_lang, is_playlist=True)
                 await msg.edit(
                     f"📚 **{pl_title}**\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"👤 Автор: {hashtag(info.get('uploader', ''))}\n"
                     f"🎞 Видеороликов: `{len(ids)}`\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"👇 *Выберите качество скачивания:*",
+                    f"👇 *Выберите качество для всех роликов:*",
                     buttons=kb
                 )
             except Exception as e:
@@ -1822,7 +1935,7 @@ def setup_handlers(client: TelegramClient):
                 await msg.edit(f"❌ Ошибка загрузки плейлиста:\n`{e}`")
             return
 
-        msg = await event.respond("🔍 **Глубокий анализ видео и аудиодорожек (дубляж)...**")
+        msg = await event.respond("🔍 **Анализирую видео...**")
         try:
             opts = ytdlp_opts()
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -1832,50 +1945,58 @@ def setup_handlers(client: TelegramClient):
                 return await msg.edit("❌ Прямые эфиры не поддерживаются.")
 
             vid = info["id"]
-            title = info.get("title") or info.get("alt_title") or f"Ролик {vid}"
+            orig_title = info.get("title") or info.get("alt_title") or f"Ролик {vid}"
             uploader = info.get("uploader", "Unknown")
             duration = int(info.get("duration") or 0)
             is_short = is_shorts_url(url, info)
 
-            db.update_title_if_needed(vid, title)
+            ru_title = await translate_title_to_ru(orig_title)
+            db.update_title_if_needed(vid, orig_title)
 
             tiers = get_available_tiers(info)
             max_tier = tiers[0] if tiers else 720
-            
-            # Глубокая проверка дорожек: ищет дубляж и AI-автоперевод
             audio_info = detect_audio_tracks(info)
-            is_multi = audio_info["is_multiaudio"]
+
+            # Выбор языка
+            if audio_info["has_official_dub"]:
+                selected_lang = "ru"
+            elif audio_info["needs_yandex_ai"]:
+                selected_lang = "orig"
+            else:
+                selected_lang = "orig"
 
             term_log(
                 "🎬 INFO",
-                f"[{uid}] \"{title[:35]}\" | {max_tier}p | Дорожки: {'Дубляж/AI (RU/EN)' if is_multi else 'Оригинал (1 дорожка)'}",
+                f"[{uid}] \"{orig_title[:35]}\" | {max_tier}p | RU={audio_info['has_ru']}, Dub={audio_info['has_official_dub']}, YaAI={audio_info['needs_yandex_ai']}",
                 Colors.GREEN
             )
 
-            # Если дубляжа нет — скрываем выбор языка
-            selected_lang = "ru" if is_multi else "orig"
-
             video_meta[vid] = {
-                "url": url, "title": title, "uploader": uploader,
-                "duration": duration, "is_short": is_short,
+                "url": url, "title": orig_title, "translated_title": ru_title,
+                "uploader": uploader, "duration": duration, "is_short": is_short,
                 "max_quality": max_tier, "tiers": tiers,
-                "is_multiaudio": is_multi,
+                "audio_info": audio_info,
                 "selected_lang": selected_lang
             }
 
             kb = make_video_keyboard(vid, current_lang=selected_lang, is_playlist=False)
             kind = "📱 Shorts" if is_short else "🎥 Видео"
 
-            msg_text = (
-                f"🎥 **{title}**\n"
+            msg_text = f"🎥 **{orig_title}**\n"
+            if ru_title:
+                msg_text += f"🇷🇺 *{ru_title}*\n"
+            msg_text += (
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"👤 Автор: {hashtag(uploader)}\n"
                 f"⏱ Длительность: `{timedelta(seconds=duration)}`\n"
-                f"📐 Максимальное качество: `{max_tier}p`\n"
+                f"📐 Макс. качество: `{max_tier}p`\n"
                 f"🧬 Формат: `{kind}`\n"
             )
-            if is_multi:
-                msg_text += f"🔊 Озвучка: **🇷🇺 Русский** *(доступен выбор)*\n"
+            if audio_info["has_official_dub"]:
+                msg_text += "🔊 Озвучка: **🇷🇺 Официальный дубляж** *(доступен выбор)*\n"
+            elif audio_info["needs_yandex_ai"]:
+                msg_text += "🤖 Доступен: **Нейроперевод Яндекс AI**\n"
+
             msg_text += "━━━━━━━━━━━━━━━━━━━━\n👇 *Выберите качество для загрузки:*"
 
             await msg.edit(msg_text, buttons=kb)
@@ -1899,7 +2020,7 @@ def setup_handlers(client: TelegramClient):
             await event.answer("⚠️ Задача уже завершена или отменена.", alert=True)
 
     # ─────────────────────────────────────────
-    # СКАЧИВАНИЕ И ВЫГРУЗКА
+    # СКАЧИВАНИЕ И ОТПРАВКА
     # ─────────────────────────────────────────
     @client.on(events.CallbackQuery(pattern=b"^dl:"))
     async def on_download(event):
@@ -1920,51 +2041,78 @@ def setup_handlers(client: TelegramClient):
         cancel_kb = [[Button.inline("❌ Отменить загрузку", f"cancel:{task_id}".encode())]]
 
         if lang == "ru":
-            lang_label = "🇷🇺 Русский"
+            lang_label = "🇷🇺 Дубляж"
+        elif lang == "ya":
+            lang_label = "🤖 Яндекс AI"
         elif lang == "en":
-            lang_label = "🇬🇧 English"
+            lang_label = "🇬🇧 Оригинал"
         else:
             lang_label = "Оригинальный звук"
 
         q_label = "MP3 🎵" if quality == "mp3" else f"{quality}p 🎬"
-        msg = await event.reply(f"⏳ **Подготовка к обработке...**\nКачество: `{q_label}` | Звук: `{lang_label}`", buttons=cancel_kb)
+        msg = await event.reply(f"⏳ **Подготовка...**\nКачество: `{q_label}` | Звук: `{lang_label}`", buttons=cancel_kb)
 
-        # 1. Проверяем локальный кэш
         cache_data = db.get_cache(vid, quality, lang=lang)
         if cache_data:
             cached_file_id, cached_title = cache_data
-            term_log("⚡ CACHE HIT", f"[{uid}] Видео {vid} [{quality}p_{lang.upper()}] найдено в кэше! Мгновенная отдача...", Colors.GREEN)
+            term_log("⚡ CACHE HIT", f"[{uid}] Видео {vid} [{quality}p_{lang.upper()}] отдано из кэша!", Colors.GREEN)
             await msg.edit(f"⚡ **Найдено в кэше! Отправка без задержки...**")
-            caption_suffix = f" [{lang_label}]" if lang in ("ru", "en") else ""
-            caption = f"🎬 **{cached_title or meta['title']}**{caption_suffix}\n\n👤 {hashtag(meta['uploader'])}"
+            caption_suffix = f" [{lang_label}]" if lang in ("ru", "en", "ya") else ""
+            ru_title_cached = meta.get("translated_title")
+            if ru_title_cached:
+                caption = (
+                    f"🎬 **{cached_title or meta['title']}**\n"
+                    f"🇷🇺 *{ru_title_cached}*{caption_suffix}\n\n"
+                    f"👤 {hashtag(meta['uploader'])}"
+                )
+            else:
+                caption = f"🎬 **{cached_title or meta['title']}**{caption_suffix}\n\n👤 {hashtag(meta['uploader'])}"
             try:
                 await client.send_file(uid, cached_file_id, caption=caption)
                 await msg.delete()
                 db.add_stats(uid, 0)
                 cancel_tokens.pop(task_id, None)
-                term_log("✅ CACHE SENT", f"[{uid}] Ролик {vid} успешно отдан из кэша (0 секунд).", Colors.GREEN)
                 return
             except Exception as e:
-                term_log("⚠️ CACHE INVALID", f"[{uid}] File ID из кэша недействителен ({e}), перекачиваю...", Colors.YELLOW)
-                db.del_cache(vid, f"{quality}_{lang}" if lang in ("ru", "en") else quality)
+                db.del_cache(vid, f"{quality}_{lang}" if lang in ("ru", "en", "ya") else quality)
 
-        # 2. Скачивание и кодирование
         try:
+            download_lang = "orig" if lang == "ya" else lang
+
             if quality == "mp3":
-                final = await asyncio.to_thread(download_mp3, meta["url"], uid, vid, lang, token)
+                final = await asyncio.to_thread(download_mp3, meta["url"], uid, vid, download_lang, token)
                 thumb = None
-                delivered_tier = "mp3"
             else:
-                final, thumb, delivered_tier = await asyncio.to_thread(
-                    process_video, meta["url"], quality, uid, vid, lang, token)
+                raw_src = await asyncio.to_thread(download_video, meta["url"], quality, uid, vid, download_lang, token)
+                thumb_key = f"{vid}_{download_lang}" if download_lang in ("ru", "en") else str(vid)
+                thumb = make_thumb(uid, thumb_key)
+                final = os.path.join(DOWNLOAD_DIR, f"{uid}_{vid}_{lang}_fast.mp4")
+
+                if lang == "ya":
+                    await msg.edit("🤖 **Нейросеть Яндекса генерирует русскую озвучку...**", buttons=cancel_kb)
+                    ya_voice = await fetch_yandex_voiceover(meta["url"], meta["duration"], token)
+                    if ya_voice:
+                        await msg.edit("⚡ **Сведение дорожек (Direct Copy)...**", buttons=cancel_kb)
+                        merge_ok = await asyncio.to_thread(merge_yandex_audio, raw_src, ya_voice, final, token)
+                        await rm(ya_voice)
+                        await rm(raw_src)
+                        if not merge_ok:
+                            raise RuntimeError("Ошибка сведения звука Яндекса")
+                    else:
+                        term_log("⚠️ YANDEX AI", "Не удалось получить озвучку Яндекса, отправляю оригинал", Colors.YELLOW)
+                        await asyncio.to_thread(process_video_direct, raw_src, final, token)
+                        await rm(raw_src)
+                else:
+                    await asyncio.to_thread(process_video_direct, raw_src, final, token)
+                    await rm(raw_src)
 
             size_mb = os.path.getsize(final) / (1024 * 1024)
-            has_premium = is_premium_user(uid, getattr(event.sender, "username", "") or "") and is_premium
-            max_mb = 3950 if has_premium else 1950
+            is_user_premium = (is_premium_user(uid, getattr(event.sender, "username", "") or "") and is_premium)
+            max_mb = 3950 if is_user_premium else 1950
 
             if size_mb > max_mb:
-                term_log("❌ SIZE LIMIT", f"[{uid}] Размер превышает лимит: {size_mb:.1f} MB > {max_mb} MB", Colors.RED)
-                await msg.edit(f"❌ **Файл превышает лимит**\n📦 Размер: `{size_mb:.1f} МБ`\n🛡 Допустимый лимит: `{max_mb} МБ`")
+                term_log("❌ SIZE LIMIT", f"[{uid}] Файл превышает лимит: {size_mb:.1f} МБ > {max_mb} МБ", Colors.RED)
+                await msg.edit(f"❌ **Файл превышает допустимый лимит**\n📦 Размер: `{size_mb:.1f} МБ`\n🛡 Ваш лимит: `{max_mb} МБ`")
                 await rm(final)
                 if thumb:
                     await rm(thumb)
@@ -1975,8 +2123,8 @@ def setup_handlers(client: TelegramClient):
                     raise ValueError("CANCELLED")
 
                 contour = "💎 Premium 4GB" if (size_mb > 1950 and user_client) else "📦 Standard 2GB"
-                term_log("🚀 UPLOAD", f"[{uid}] Выгрузка в Telegram [{contour}] ({size_mb:.1f} МБ, {lang.upper()})...", Colors.CYAN)
-                await msg.edit(f"⚙️ **Файл подготовлен!**\n📤 Выгрузка в Telegram [{contour}]...", buttons=cancel_kb)
+                term_log("🚀 UPLOAD", f"[{uid}] Загрузка в Telegram [{contour}] ({size_mb:.1f} МБ)...", Colors.CYAN)
+                await msg.edit(f"⚙️ **Файл готов!**\n📤 Загрузка в Telegram [{contour}]...", buttons=cancel_kb)
 
                 t0 = time.time()
                 last_edit = [time.time()]
@@ -1996,7 +2144,7 @@ def setup_handlers(client: TelegramClient):
                         f"🔊 Звук: **{lang_label}**\n\n"
                         f"📊 {progress_bar(pct)} **{pct:.1f}%**\n"
                         f"⚡ Скорость: **{speed / 1024 / 1024:.1f} МБ/с**\n"
-                        f"⏳ Примерно осталось: **{timedelta(seconds=int(eta))}**"
+                        f"⏳ Осталось: **{timedelta(seconds=int(eta))}**"
                     )
                     if text == last_text[0]:
                         return
@@ -2015,11 +2163,20 @@ def setup_handlers(client: TelegramClient):
 
                 await msg.edit("⚡ **Финализация и отправка...**")
                 title_clean = meta.get("title") or f"YouTube Video {vid}"
-                caption_suffix = f" [{lang_label}]" if lang in ("ru", "en") else ""
-                caption = f"🎬 **{title_clean}**{caption_suffix}\n\n👤 {hashtag(meta['uploader'])}"
+                translated_title = meta.get("translated_title")
+                caption_suffix = f" [{lang_label}]" if lang in ("ru", "en", "ya") else ""
+                if translated_title:
+                    caption = (
+                        f"🎬 **{title_clean}**\n"
+                        f"🇷🇺 *{translated_title}*{caption_suffix}\n\n"
+                        f"👤 {hashtag(meta['uploader'])}"
+                    )
+                else:
+                    caption = f"🎬 **{title_clean}**{caption_suffix}\n\n👤 {hashtag(meta['uploader'])}"
                 attrs = []
                 if quality == "mp3":
-                    attrs.append(DocumentAttributeAudio(duration=meta["duration"], title=title_clean))
+                    audio_title = translated_title or title_clean
+                    attrs.append(DocumentAttributeAudio(duration=meta["duration"], title=audio_title))
                 else:
                     info = probe(final)
                     attrs.append(DocumentAttributeVideo(
@@ -2029,25 +2186,29 @@ def setup_handlers(client: TelegramClient):
                         supports_streaming=True
                     ))
 
+                if sender == user_client and uid == owner_id:
+                    target_peer = bot_username or (await bot.get_me()).id
+                else:
+                    target_peer = uid
+
                 sent = await sender.send_file(
-                    uid, uploaded, caption=caption, thumb=thumb,
+                    target_peer, uploaded, caption=caption, thumb=thumb,
                     attributes=attrs, supports_streaming=True)
 
                 if sender == client and sent and sent.document:
                     try:
-                        cache_save_tier = str(delivered_tier)
                         packed_id = utils.pack_bot_file_id(sent.document)
-                        db.set_cache(vid, cache_save_tier, lang, packed_id, title_clean)
-                        term_log("💾 CACHE SAVED", f"[{uid}] Закэшировано: {vid} [{cache_save_tier}p_{lang.upper()}] \"{title_clean[:30]}\"", Colors.GREEN)
+                        db.set_cache(vid, quality, lang, packed_id, title_clean)
+                        term_log("💾 CACHE SAVED", f"[{uid}] Закэшировано: {vid} [{quality}_{lang}]", Colors.GREEN)
                     except Exception as e:
-                        term_log("⚠️ CACHE ERROR", f"Не удалось сохранить кэш: {e}", Colors.YELLOW)
+                        term_log("⚠️ CACHE ERROR", f"Ошибка кэширования: {e}", Colors.YELLOW)
 
             db.add_stats(uid, size_mb)
             await rm(final)
             if thumb:
                 await rm(thumb)
             await msg.delete()
-            term_log("✅ DONE", f"[{uid}] Видео {vid} доставлено ({size_mb:.1f} МБ, {lang.upper()})", Colors.GREEN)
+            term_log("✅ DONE", f"[{uid}] Видео {vid} доставлено ({size_mb:.1f} МБ)", Colors.GREEN)
 
         except ValueError as e:
             if str(e) == "CANCELLED":
@@ -2058,7 +2219,7 @@ def setup_handlers(client: TelegramClient):
                 raise e
         except Exception as e:
             term_log("❌ ERROR", f"[{uid}] Ошибка скачивания {vid}: {e}", Colors.RED)
-            await msg.edit(f"❌ **Произошла ошибка при загрузке:**\n`{str(e)[:220]}`")
+            await msg.edit(f"❌ **Ошибка при загрузке:**\n`{str(e)[:220]}`")
             cleanup_disk_for_video(f"{uid}_{vid}")
         finally:
             cancel_tokens.pop(task_id, None)
@@ -2085,14 +2246,15 @@ def setup_handlers(client: TelegramClient):
         cancel_tokens[task_id] = token
         cancel_kb = [[Button.inline("❌ Отменить весь плейлист", f"cancel:{task_id}".encode())]]
 
-        term_log("📚 PLAYLIST START", f"[{uid}] Старт плейлиста {pl_id}: {total} роликов", Colors.MAGENTA)
+        mode_name = "MP3 (Аудио)" if quality == "mp3" else f"{quality}p (Видео)"
+        term_log("📚 PLAYLIST START", f"[{uid}] Старт плейлиста {pl_id}: {total} файлов ({mode_name})", Colors.MAGENTA)
         await event.edit(
             f"📚 **{meta['title']}**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🎞 Всего роликов: `{total}` | Пачки по `{batch}`\n"
-            f"📐 Качество: `{quality}p`\n"
+            f"📐 Режим: `{mode_name}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⏳ *Обработка плейлиста запущена...*",
+            f"⏳ *Обработка запущена...*",
             buttons=cancel_kb
         )
 
@@ -2110,8 +2272,8 @@ def setup_handlers(client: TelegramClient):
             term_log("🛑 PLAYLIST CANCEL", f"[{uid}] Плейлист {pl_id} отменен", Colors.YELLOW)
             await client.send_message(uid, "❌ **Обработка плейлиста отменена.**")
         else:
-            term_log("✅ PLAYLIST DONE", f"[{uid}] Плейлист {pl_id} доставлен", Colors.GREEN)
-            await client.send_message(uid, f"✅ **Плейлист полностью обработан!**\n🎞 Доставлено `{total}` видео.")
+            term_log("✅ PLAYLIST DONE", f"[{uid}] Плейлист {pl_id} полностью доставлен", Colors.GREEN)
+            await client.send_message(uid, f"✅ **Плейлист полностью обработан!**\n🎞 Доставлено `{total}` файлов.")
         cancel_tokens.pop(task_id, None)
 
     async def process_playlist_item(vid: str, quality: str, uid: int, pl_task_id: str, token: CancelToken, lang: str = "orig", delay: float = 0):
@@ -2134,7 +2296,12 @@ def setup_handlers(client: TelegramClient):
             term_log("❌ PL ITEM", f"[{uid}] Ошибка метаданных {vid}: {e}", Colors.RED)
             return
 
-        caption = f"🎬 **{title}**\n\n👤 {hashtag(uploader)}"
+        ru_title = await translate_title_to_ru(title)
+        if ru_title:
+            caption = f"🎬 **{title}**\n🇷🇺 *{ru_title}*\n\n👤 {hashtag(uploader)}"
+        else:
+            caption = f"🎬 **{title}**\n\n👤 {hashtag(uploader)}"
+        audio_title = ru_title or title
 
         cache_data = db.get_cache(vid, quality, lang=lang)
         if cache_data:
@@ -2144,14 +2311,30 @@ def setup_handlers(client: TelegramClient):
                 term_log("⚡ PL CACHE", f"[{uid}] Ролик плейлиста {vid} отправлен из кэша", Colors.GREEN)
                 return
             except Exception:
-                db.del_cache(vid, f"{quality}_{lang}" if lang in ("ru", "en") else quality)
+                db.del_cache(vid, f"{quality}_{lang}" if lang in ("ru", "en", "ya") else quality)
 
         cancel_kb = [[Button.inline("❌ Отменить плейлист", f"cancel:{pl_task_id}".encode())]]
         status = await client.send_message(uid, f"📥 **Обрабатывается:**\n`{title[:50]}`", buttons=cancel_kb)
 
         try:
-            final, thumb, del_tier = await asyncio.to_thread(
-                process_video, url, quality, uid, vid, lang, token)
+            if quality == "mp3":
+                final = await asyncio.to_thread(download_mp3, url, uid, vid, lang, token)
+                thumb = None
+                attrs = [DocumentAttributeAudio(duration=duration, title=audio_title, performer=uploader)]
+            else:
+                raw_src = await asyncio.to_thread(download_video, url, quality, uid, vid, lang, token)
+                thumb_key = f"{vid}_{lang}" if lang in ("ru", "en") else str(vid)
+                thumb = make_thumb(uid, thumb_key)
+                final = os.path.join(DOWNLOAD_DIR, f"{uid}_{vid}_{lang}_fast.mp4")
+                await asyncio.to_thread(process_video_direct, raw_src, final, token)
+                await rm(raw_src)
+                info_p = probe(final)
+                attrs = [DocumentAttributeVideo(
+                    duration=info_p["duration"] or duration,
+                    w=info_p["width"] or 1280,
+                    h=info_p["height"] or 720,
+                    supports_streaming=True)]
+
             size_mb = os.path.getsize(final) / (1024 * 1024)
 
             async with upload_semaphore:
@@ -2165,23 +2348,22 @@ def setup_handlers(client: TelegramClient):
                         await rm(thumb)
                     return
 
-                info = probe(final)
-                attrs = [DocumentAttributeVideo(
-                    duration=info["duration"] or duration,
-                    w=info["width"] or 1280,
-                    h=info["height"] or 720,
-                    supports_streaming=True)]
                 sender = user_client if (size_mb > 1950 and is_premium and user_client) else client
                 uploaded = await upload_file(sender, final, cancel_token=token)
                 if token.cancelled:
                     raise ValueError("CANCELLED")
 
+                if sender == user_client and uid == owner_id:
+                    target_peer = bot_username or (await bot.get_me()).id
+                else:
+                    target_peer = uid
+
                 sent = await sender.send_file(
-                    uid, uploaded, caption=caption, thumb=thumb,
+                    target_peer, uploaded, caption=caption, thumb=thumb,
                     attributes=attrs, supports_streaming=True)
                 if sender == client and sent and sent.document:
                     try:
-                        db.set_cache(vid, str(del_tier), lang, utils.pack_bot_file_id(sent.document), title)
+                        db.set_cache(vid, quality, lang, utils.pack_bot_file_id(sent.document), title)
                     except Exception:
                         pass
 
@@ -2202,15 +2384,8 @@ def setup_handlers(client: TelegramClient):
             cleanup_disk_for_video(f"{uid}_{vid}")
 
 # ═══════════════════════════════════════════════
-# КОНСОЛЬНОЕ МЕНЮ
+# КОНСОЛЬНОЕ МЕНЮ TUI
 # ═══════════════════════════════════════════════
-CODECS = {"1": "libx264", "2": "h264_amf", "3": "h264_nvenc", "4": "h264_qsv"}
-CODEC_NAMES = {
-    "libx264": "libx264 (CPU)",
-    "h264_amf": "h264_amf (AMD Radeon RX 6600)",
-    "h264_nvenc": "h264_nvenc (NVIDIA GeForce)",
-    "h264_qsv": "h264_qsv (Intel QuickSync)",
-}
 COOKIES = {"1": "chrome", "2": "firefox", "3": "edge", "4": "brave", "0": ""}
 
 def _clear():
@@ -2234,7 +2409,7 @@ def _wait_key(timeout: int = 5) -> bool:
         return False
 
 def run_menu() -> bool:
-    global VIDEO_ENCODER, USE_PROXY, DEFAULT_BATCH, BROWSER_COOKIES
+    global USE_PROXY, DEFAULT_BATCH, BROWSER_COOKIES
     global USE_USERBOT, QUICK_START, OWNER_ID
 
     while True:
@@ -2250,18 +2425,24 @@ def run_menu() -> bool:
         cprint("  🎛️  ГЛАВНОЕ МЕНЮ УПРАВЛЕНИЯ\n", Colors.CYAN, bold=True)
         cprint(f"  {Colors.BOLD}[1]{Colors.RESET} ▶️  ЗАПУСТИТЬ БОТА", Colors.WHITE, bold=True)
         print(f"  {Colors.BOLD}[2]{Colors.RESET} 💎 Premium-юзербот (4 ГБ):     [{ub_state}]{ub_note}")
-        print(f"  {Colors.BOLD}[3]{Colors.RESET} 🎥 Видеокодек:                 [{Colors.YELLOW}{CODEC_NAMES.get(VIDEO_ENCODER, VIDEO_ENCODER)}{Colors.RESET}]")
+        print(f"  {Colors.BOLD}[3]{Colors.RESET} 🚀 Видеодвижок:                [{Colors.GREEN}Direct Copy (0% CPU/GPU){Colors.RESET}]")
         print(f"  {Colors.BOLD}[4]{Colors.RESET} 🌐 SOCKS5 Прокси:              [{'ВКЛЮЧЕН 🟢' if USE_PROXY else 'ВЫКЛЮЧЕН 🔴'}]")
         print(f"  {Colors.BOLD}[5]{Colors.RESET} 📦 Пачка в плейлисте:          [по {Colors.MAGENTA}{DEFAULT_BATCH}{Colors.RESET} видео]")
 
-        if os.path.exists("www.youtube.com_cookies.txt"):
-            cookie_status = f"{Colors.GREEN}www.youtube.com_cookies.txt 🟢{Colors.RESET}"
-        elif os.path.exists("cookies.txt"):
-            cookie_status = f"{Colors.GREEN}cookies.txt 🟢{Colors.RESET}"
-        elif COOKIE_FILE and os.path.exists(COOKIE_FILE):
-            cookie_status = f"{Colors.GREEN}{COOKIE_FILE} 🟢{Colors.RESET}"
-        else:
-            cookie_status = BROWSER_COOKIES or f"{Colors.RED}не заданы{Colors.RESET}"
+        def _cookie_file_status(path: str) -> Optional[str]:
+            if not os.path.exists(path):
+                return None
+            age_h = (time.time() - os.path.getmtime(path)) / 3600
+            if age_h <= COOKIE_MAX_AGE_HOURS:
+                return f"{Colors.GREEN}{path} 🟢 (свежие, {age_h:.1f}ч){Colors.RESET}"
+            return f"{Colors.YELLOW}{path} ⚠️ устарели ({age_h:.1f}ч > {COOKIE_MAX_AGE_HOURS:.0f}ч, используется браузер){Colors.RESET}"
+
+        cookie_status = (
+            _cookie_file_status("www.youtube.com_cookies.txt")
+            or _cookie_file_status("cookies.txt")
+            or (COOKIE_FILE and _cookie_file_status(COOKIE_FILE))
+            or (f"{Colors.CYAN}браузер: {BROWSER_COOKIES}{Colors.RESET}" if BROWSER_COOKIES else f"{Colors.RED}не заданы{Colors.RESET}")
+        )
 
         print(f"  {Colors.BOLD}[6]{Colors.RESET} 🍪 YouTube Cookies:            [{cookie_status}]")
         print(f"  {Colors.BOLD}[7]{Colors.RESET} ⚡ Быстрый старт (без меню):   [{'ВКЛЮЧЕН' if QUICK_START else 'ВЫКЛЮЧЕН'}]")
@@ -2279,14 +2460,7 @@ def run_menu() -> bool:
             update_env("USE_USERBOT", str(USE_USERBOT).lower())
             _pause()
         elif choice == "3":
-            print("\n  Выберите энкодер:")
-            for k, v in CODEC_NAMES.items():
-                print(f"   • {k}: {v}")
-            enc = input("\n  Введите номер (1-4): ").strip()
-            if enc in CODECS:
-                VIDEO_ENCODER = CODECS[enc]
-                update_env("VIDEO_ENCODER", VIDEO_ENCODER)
-                cprint(f"  ✅ Установлен кодек: {CODEC_NAMES[VIDEO_ENCODER]}", Colors.GREEN)
+            print(f"\n  {Colors.GREEN}Используется чистый Direct Copy. Видеокарта не задействуется.{Colors.RESET}")
             _pause()
         elif choice == "4":
             USE_PROXY = not USE_PROXY
@@ -2335,12 +2509,92 @@ def run_menu() -> bool:
             return False
 
 # ═══════════════════════════════════════════════
+# ФОНОВОЕ ОБСЛУЖИВАНИЕ: cookies, версия yt-dlp
+# ═══════════════════════════════════════════════
+TEST_VIDEO_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"  # первое видео на YouTube, всегда доступно
+
+def check_ytdlp_outdated() -> Optional[str]:
+    """Сверяет установленную версию yt-dlp с последней на PyPI.
+    Не обновляет автоматически (обновление всё равно не подхватится без
+    перезапуска процесса) — просто предупреждает, если версия устарела."""
+    try:
+        current = getattr(yt_dlp.version, "__version__", None) or "unknown"
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/yt-dlp/json",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        latest = data.get("info", {}).get("version")
+        if latest and current != "unknown" and latest != current:
+            return f"⚠️ Установлена версия yt-dlp {current}, на PyPI уже {latest}.\nОбновление: `pip install -U yt-dlp` и перезапуск бота."
+    except Exception as e:
+        term_log("⚠️ YT-DLP CHECK", f"Не удалось проверить обновления: {e}", Colors.YELLOW)
+    return None
+
+def check_cookies_broken() -> Optional[str]:
+    """Пробует получить метаданные тестового видео с текущими cookies/опциями.
+    Если YouTube просит авторизацию — куки протухли/не подключены."""
+    try:
+        opts = ytdlp_opts()
+        opts["skip_download"] = True
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.extract_info(TEST_VIDEO_URL, download=False)
+        return None
+    except Exception as e:
+        msg = str(e)
+        if any(s in msg for s in ("Sign in", "confirm you're not a bot", "cookies", "age", "private")):
+            cookie_opt = get_cookie_opts()
+            source = cookie_opt.get("cookiefile") or (f"браузер: {cookie_opt.get('cookiesfrombrowser')}" if cookie_opt.get("cookiesfrombrowser") else "не заданы")
+            return (
+                f"🍪 Похоже, куки YouTube не работают (источник: `{source}`).\n"
+                f"Обнови файл с куками или зайди в YouTube в браузере, указанном в BROWSER_COOKIES.\n"
+                f"Ошибка: `{msg[:150]}`"
+            )
+        return None
+
+async def maintenance_loop():
+    """Раз в COOKIE_CHECK_INTERVAL_HOURS часов проверяет куки и версию yt-dlp,
+    шлёт владельцу сообщение в Telegram, если что-то сломалось/устарело."""
+    cookie_interval = float(_env("COOKIE_CHECK_INTERVAL_HOURS", "6"))
+    ytdlp_interval = float(_env("YTDLP_CHECK_INTERVAL_HOURS", "24"))
+    last_ytdlp_check = 0.0
+
+    while True:
+        try:
+            cookie_issue = await asyncio.to_thread(check_cookies_broken)
+            if cookie_issue and owner_id:
+                term_log("⚠️ COOKIES", "Обнаружена проблема с cookies, уведомляю владельца", Colors.YELLOW)
+                try:
+                    await bot.send_message(owner_id, cookie_issue, parse_mode="markdown")
+                except Exception:
+                    pass
+
+            now = time.time()
+            if now - last_ytdlp_check >= ytdlp_interval * 3600:
+                last_ytdlp_check = now
+                update_issue = await asyncio.to_thread(check_ytdlp_outdated)
+                if update_issue and owner_id:
+                    try:
+                        await bot.send_message(owner_id, update_issue, parse_mode="markdown")
+                    except Exception:
+                        pass
+        except Exception as e:
+            term_log("⚠️ MAINTENANCE", f"Ошибка фоновой проверки: {e}", Colors.YELLOW)
+
+        await asyncio.sleep(cookie_interval * 3600)
+
+# ═══════════════════════════════════════════════
 # СТАРТ СИСТЕМЫ
 # ═══════════════════════════════════════════════
 async def start_bot():
     global bot, user_client, is_premium, bot_username, owner_id, OWNER_ID
     owner_id = OWNER_ID
     proxy = get_telethon_proxy()
+
+    removed, freed_mb = cleanup_download_dir_on_boot()
+    if removed:
+        term_log("🧹 CLEANUP", f"Удалено {removed} огрызков файлов из {DOWNLOAD_DIR} (освобождено {freed_mb:.1f} МБ)", Colors.CYAN)
 
     term_log("🚀 INIT", "Инициализация клиента Telegram Bot...", Colors.CYAN)
     bot = TelegramClient("bot_session", API_ID, API_HASH, proxy=proxy)
@@ -2371,12 +2625,13 @@ async def start_bot():
     try:
         ver = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, check=True)
         first_line = ver.stdout.splitlines()[0] if ver.stdout else "FFmpeg OK"
-        term_log("🎥 FFMPEG", f"{first_line} | Кодек: {VIDEO_ENCODER}", Colors.GREEN)
+        term_log("🎥 FFMPEG", f"{first_line} | Движок: Direct Copy", Colors.GREEN)
     except Exception:
         term_log("⛔ CRITICAL", "FFmpeg не обнаружен в PATH! Проверьте установку.", Colors.RED)
         sys.exit(1)
 
     setup_handlers(bot)
+    asyncio.create_task(maintenance_loop())
     term_log("🟢 READY", "Система готова к приёму ссылок и команд. Ожидание сообщений...", Colors.GREEN)
     await bot.run_until_disconnected()
 

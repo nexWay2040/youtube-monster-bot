@@ -2,6 +2,9 @@
 .env
 .evn
 .env.txt
+.env.bak
+.env.old
+.env.*.local
 *.session
 *.session-journal
 
@@ -15,7 +18,10 @@ cookies.txt
 *.db-journal
 *.db-wal
 *.db-shm
+
+# ── Логи (включая ротацию RotatingFileHandler: bot.log.1, bot.log.2...) ──
 *.log
+*.log.*
 
 # ── Скачанный контент и временные файлы ──
 downloads/
@@ -36,3 +42,11 @@ venv/
 # ── IDE / редакторы ──
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# ── Мусор операционной системы ──
+Thumbs.db
+desktop.ini
+.DS_Store
