@@ -19,6 +19,7 @@ import logging
 import time
 import subprocess
 import shutil
+import threading
 import sqlite3
 import urllib.parse
 import urllib.request
@@ -105,6 +106,19 @@ BROWSER_COOKIES = _env("BROWSER_COOKIES", "")
 USE_PROXY = _env("USE_PROXY", "false").lower() == "true"
 PROXY_HOST = _env("PROXY_HOST", "127.0.0.1")
 PROXY_PORT = int(_env("PROXY_PORT", "10808"))
+
+# Отдельный прокси для yt-dlp (YouTube), независимый от прокси Telegram.
+# Нужен потому, что YouTube привязывает cookies к IP/фингерпринту запроса:
+# если прокси Telegram часто меняет выходной сервер (VPN-клиенты вроде Happ
+# так и делают), куки постоянно "слетают". Держи для YouTube отдельный,
+# стабильный/статичный адрес.
+# YTDLP_USE_PROXY не задан → берёт то же самое, что USE_PROXY (старое поведение).
+# YTDLP_USE_PROXY=false → yt-dlp всегда идёт напрямую, без прокси.
+# YTDLP_USE_PROXY=true → использует YTDLP_PROXY_HOST/PORT (или PROXY_HOST/PORT, если не заданы отдельно).
+_ytdlp_proxy_env = _env("YTDLP_USE_PROXY", "")
+YTDLP_USE_PROXY = (_ytdlp_proxy_env.lower() == "true") if _ytdlp_proxy_env else USE_PROXY
+YTDLP_PROXY_HOST = _env("YTDLP_PROXY_HOST", PROXY_HOST)
+YTDLP_PROXY_PORT = int(_env("YTDLP_PROXY_PORT", str(PROXY_PORT)))
 
 OWNER_ID = int(_env("OWNER_ID", "0"))
 
@@ -217,9 +231,116 @@ class DB:
                 username TEXT,
                 added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS monitor_videos (
+                video_id TEXT PRIMARY KEY,
+                channel_name TEXT,
+                title TEXT,
+                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS monitor_channels (
+                channel_key TEXT PRIMARY KEY,
+                bootstrapped INTEGER DEFAULT 0
+            );
         """)
         self.conn.commit()
+        # Миграция: добавляем колонки под полноценное управление каналами
+        # прямо из Telegram (имя, URL, хештег, вкл/выкл), если их ещё нет.
+        # ВАЖНО: SQLite не разрешает ALTER TABLE ADD COLUMN с не-константным
+        # DEFAULT (вроде CURRENT_TIMESTAMP) — поэтому added_at без дефолта,
+        # порядок вывода берём по rowid (и так соответствует порядку добавления).
+        for col, decl in [
+            ("name", "TEXT"),
+            ("url", "TEXT"),
+            ("hashtag", "TEXT"),
+            ("active", "INTEGER DEFAULT 1"),
+            ("added_at", "TIMESTAMP"),
+            ("target_channel", "TEXT"),
+        ]:
+            try:
+                self.c.execute(f"ALTER TABLE monitor_channels ADD COLUMN {col} {decl}")
+                self.conn.commit()
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    # это НЕ "колонка уже есть" — реальная ошибка миграции, не прячем её
+                    print(f"[DB MIGRATE WARNING] monitor_channels.{col}: {e}")
         self._sync_admins()
+
+    def monitor_is_posted(self, video_id: str) -> bool:
+        self.c.execute("SELECT 1 FROM monitor_videos WHERE video_id=?", (video_id,))
+        return self.c.fetchone() is not None
+
+    def monitor_mark_posted(self, video_id: str, channel_name: str, title: str):
+        self.c.execute(
+            "INSERT OR IGNORE INTO monitor_videos (video_id, channel_name, title) VALUES (?,?,?)",
+            (video_id, channel_name, title)
+        )
+        self.conn.commit()
+
+    def monitor_forget(self, video_id: str) -> bool:
+        self.c.execute("DELETE FROM monitor_videos WHERE video_id=?", (video_id,))
+        self.conn.commit()
+        return self.c.rowcount > 0
+
+    def monitor_is_bootstrapped(self, channel_key: str) -> bool:
+        self.c.execute("SELECT bootstrapped FROM monitor_channels WHERE channel_key=?", (channel_key,))
+        row = self.c.fetchone()
+        return bool(row and row[0])
+
+    def monitor_set_bootstrapped(self, channel_key: str):
+        self.c.execute(
+            "INSERT INTO monitor_channels (channel_key, bootstrapped) VALUES (?,1) "
+            "ON CONFLICT(channel_key) DO UPDATE SET bootstrapped=1",
+            (channel_key,)
+        )
+        self.conn.commit()
+
+    def monitor_add_channel(self, key: str, name: str, url: str, hashtag: str, target_channel: str = None):
+        self.c.execute(
+            "INSERT INTO monitor_channels (channel_key, name, url, hashtag, target_channel, active, bootstrapped, added_at) "
+            "VALUES (?,?,?,?,?,1,0,CURRENT_TIMESTAMP) "
+            "ON CONFLICT(channel_key) DO UPDATE SET name=excluded.name, url=excluded.url, "
+            "hashtag=excluded.hashtag, target_channel=excluded.target_channel, active=1",
+            (key, name, url, hashtag, target_channel)
+        )
+        self.conn.commit()
+
+    def monitor_remove_channel(self, key: str) -> bool:
+        self.c.execute("DELETE FROM monitor_channels WHERE channel_key=?", (key,))
+        self.conn.commit()
+        return self.c.rowcount > 0
+
+    def monitor_set_hashtag(self, key: str, hashtag: str) -> bool:
+        self.c.execute("UPDATE monitor_channels SET hashtag=? WHERE channel_key=?", (hashtag, key))
+        self.conn.commit()
+        return self.c.rowcount > 0
+
+    def monitor_set_target(self, key: str, target_channel: str) -> bool:
+        self.c.execute("UPDATE monitor_channels SET target_channel=? WHERE channel_key=?", (target_channel, key))
+        self.conn.commit()
+        return self.c.rowcount > 0
+
+    def monitor_list_channels(self, active_only: bool = True) -> list:
+        q = "SELECT channel_key, name, url, hashtag, bootstrapped, active, target_channel FROM monitor_channels"
+        if active_only:
+            q += " WHERE active=1"
+        q += " ORDER BY rowid"
+        self.c.execute(q)
+        return [
+            {"key": r[0], "name": r[1], "url": r[2], "hashtag": r[3], "bootstrapped": bool(r[4]),
+             "active": bool(r[5]), "target_channel": r[6]}
+            for r in self.c.fetchall()
+        ]
+
+    def monitor_get_channel(self, key: str) -> Optional[dict]:
+        self.c.execute(
+            "SELECT channel_key, name, url, hashtag, bootstrapped, active, target_channel FROM monitor_channels WHERE channel_key=?",
+            (key,)
+        )
+        r = self.c.fetchone()
+        if not r:
+            return None
+        return {"key": r[0], "name": r[1], "url": r[2], "hashtag": r[3], "bootstrapped": bool(r[4]),
+                "active": bool(r[5]), "target_channel": r[6]}
 
     def _sync_admins(self):
         try:
@@ -855,6 +976,43 @@ def process_video_direct(src: str, dst: str, cancel_token=None) -> Tuple[bool, s
 # ─────────────────────────────────────────────
 # ОПРЕДЕЛЕНИЕ COOKIES (с проверкой свежести файла)
 # ─────────────────────────────────────────────
+# Каждый прямой запрос к браузерным cookies (cookiesfrombrowser) заставляет
+# yt-dlp заново сканировать базу cookies браузера — это медленно и печатает
+# в консоль мигающий прогресс ("Extracting cookies from edge: 0/75"),
+# который НЕ отключается через quiet/no_warnings. Поэтому материализуем
+# куки из браузера в обычный файл раз в BROWSER_COOKIE_CACHE_TTL секунд,
+# а дальше просто переиспользуем этот файл как cookiefile — быстро и тихо.
+_BROWSER_COOKIE_CACHE_PATH = "_browser_cookies_cache.txt"
+BROWSER_COOKIE_CACHE_TTL = float(_env("BROWSER_COOKIE_CACHE_TTL_SECONDS", "900"))
+_browser_cookie_lock = threading.Lock()
+
+def _materialize_browser_cookies() -> bool:
+    """Пишет куки из браузера в файл АТОМАРНО (сначала во временный файл,
+    потом os.replace) и под локом — если это дёргают параллельно два
+    скачивания сразу, второй поток дождётся первого вместо того, чтобы
+    писать в тот же файл одновременно и испортить его (именно это раньше
+    вызывало 'does not look like a Netscape format cookies file')."""
+    with _browser_cookie_lock:
+        tmp_path = _BROWSER_COOKIE_CACHE_PATH + ".tmp"
+        try:
+            with yt_dlp.YoutubeDL({
+                "quiet": True,
+                "no_warnings": True,
+                "noprogress": True,
+                "cookiesfrombrowser": (BROWSER_COOKIES,),
+            }) as ydl:
+                ydl.cookiejar.save(tmp_path, ignore_discard=True, ignore_expires=True)
+            os.replace(tmp_path, _BROWSER_COOKIE_CACHE_PATH)  # атомарно на одной ФС
+            return True
+        except Exception as e:
+            term_log("⚠️ COOKIES", f"Не удалось извлечь куки из браузера '{BROWSER_COOKIES}': {e}", Colors.YELLOW)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            return False
+
 def get_cookie_opts() -> dict:
     """
     Раньше экспортированный cookies.txt всегда имел приоритет над куками
@@ -884,6 +1042,15 @@ def get_cookie_opts() -> dict:
                 )
 
     if BROWSER_COOKIES and BROWSER_COOKIES.lower() not in ("none", "false", "0", ""):
+        needs_refresh = True
+        if os.path.exists(_BROWSER_COOKIE_CACHE_PATH):
+            age = time.time() - os.path.getmtime(_BROWSER_COOKIE_CACHE_PATH)
+            needs_refresh = age > BROWSER_COOKIE_CACHE_TTL
+        if needs_refresh:
+            _materialize_browser_cookies()
+        if os.path.exists(_BROWSER_COOKIE_CACHE_PATH):
+            return {"cookiefile": _BROWSER_COOKIE_CACHE_PATH}
+        # если материализация не удалась хотя бы раз — fallback на прямое чтение браузера
         return {"cookiesfrombrowser": (BROWSER_COOKIES,)}
 
     return {}
@@ -892,31 +1059,68 @@ def ytdlp_opts() -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
+        "noprogress": True,
         "retries": 10,
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 4,
-        "extractor_args": {
-            "youtube": ["player_client=web,ios,mweb"]
-        },
         "sleep_interval_requests": 1,
     }
+    # Раньше здесь был жёстко прописан "extractor_args": {"youtube": ["player_client=web,ios,mweb"]}.
+    # Это ПЕРЕБИВАЛО умный автовыбор клиента в yt-dlp: если переданы валидные
+    # cookies залогиненного аккаунта, yt-dlp сам выбирает клиенты вроде
+    # web_creator/tv_downgraded, которые отдают полный список форматов
+    # (честные 1080p/720p60). А клиенты ios/mweb часто требуют po_token для
+    # топовых форматов и без него отдают урезанный список (потолок нередко
+    # 360-480p) — из-за этого "1080p" по факту скачивался в SD.
+    # Просто не переопределяем extractor_args — пусть yt-dlp решает сам.
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         opts["ffmpeg_location"] = os.path.dirname(ffmpeg_path)
-    if USE_PROXY:
-        opts["proxy"] = f"socks5://{PROXY_HOST}:{PROXY_PORT}"
+    if YTDLP_USE_PROXY:
+        opts["proxy"] = f"socks5://{YTDLP_PROXY_HOST}:{YTDLP_PROXY_PORT}"
 
     opts.update(get_cookie_opts())
     return opts
 
+def make_progress_hook(video_id: str, cancel_token=None):
+    """Хук для yt-dlp: пишет скорость/%/ETA в терминал (раз в ~3 сек, чтобы не
+    спамить), плюс проверяет отмену. noprogress=True в opts глушит ТОЛЬКО
+    встроенный вывод yt-dlp (и мигание при чтении cookies из браузера) —
+    на этот наш собственный хук он не влияет."""
+    state = {"last_log": 0.0}
+
+    def hook(d):
+        if cancel_token and cancel_token.cancelled:
+            raise ValueError("CANCELLED")
+
+        status = d.get("status")
+        if status == "downloading":
+            now = time.time()
+            if now - state["last_log"] >= 3:
+                state["last_log"] = now
+                downloaded = d.get("downloaded_bytes") or 0
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                speed = d.get("speed") or 0
+                pct = (downloaded / total * 100) if total else 0
+                eta = d.get("eta")
+                speed_mb = (speed / 1024 / 1024) if speed else 0
+                term_log(
+                    "📥 DOWNLOAD",
+                    f"[{video_id}] {pct:5.1f}% | {speed_mb:6.2f} МБ/с | ETA {eta if eta is not None else '?'}с "
+                    f"| {downloaded / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} МБ",
+                    Colors.CYAN
+                )
+        elif status == "finished":
+            term_log("✅ DOWNLOAD", f"[{video_id}] Скачивание завершено, обрабатываю (merge/конвертация)...", Colors.GREEN)
+        elif status == "error":
+            term_log("❌ DOWNLOAD", f"[{video_id}] yt-dlp сообщил об ошибке во время скачивания", Colors.RED)
+
+    return hook
+
 def download_video(url: str, quality: str, user_id: int, video_id: str, lang: str = "orig", cancel_token=None) -> str:
     opts = ytdlp_opts()
     opts["noplaylist"] = True
-    if cancel_token:
-        def hook(d):
-            if cancel_token.cancelled:
-                raise ValueError("CANCELLED")
-        opts["progress_hooks"] = [hook]
+    opts["progress_hooks"] = [make_progress_hook(video_id, cancel_token)]
 
     file_suffix = f"_{lang}" if lang in ("ru", "en", "ya") else ""
     opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}{file_suffix}.%(ext)s")
@@ -930,7 +1134,7 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
     if lang == "ru":
         opts["format_sort"] = ["hasaud", "lang:ru", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"]
         opts["extractor_args"] = {
-            "youtube": ["player_client=web,ios,mweb", "lang=ru"]
+            "youtube": ["player_client=web,mweb", "lang=ru"]
         }
         audio_priority = [
             "bestaudio[language^=ru]", "bestaudio[language*=ru]",
@@ -949,7 +1153,7 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
     elif lang == "en":
         opts["format_sort"] = ["hasaud", "lang:en", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"]
         opts["extractor_args"] = {
-            "youtube": ["player_client=web,ios,mweb", "lang=en"]
+            "youtube": ["player_client=web,mweb", "lang=en"]
         }
         audio_priority = [
             "bestaudio[language^=en]", "bestaudio[language*=en]",
@@ -998,11 +1202,7 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
 def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", cancel_token=None) -> str:
     opts = ytdlp_opts()
     opts["noplaylist"] = True
-    if cancel_token:
-        def hook(d):
-            if cancel_token.cancelled:
-                raise ValueError("CANCELLED")
-        opts["progress_hooks"] = [hook]
+    opts["progress_hooks"] = [make_progress_hook(video_id, cancel_token)]
 
     file_suffix = f"_{lang}" if lang in ("ru", "en") else ""
     opts["outtmpl"] = os.path.join(DOWNLOAD_DIR, f"{user_id}_{video_id}{file_suffix}.%(ext)s")
@@ -1576,7 +1776,7 @@ def setup_handlers(client: TelegramClient):
         await event.answer("✅ Весь кэш успешно удален!", alert=True)
         await render_cache_page(event, page=1)
 
-    @client.on(events.CallbackQuery(pattern=b"^cdel:"))
+    @client.on(events.CallbackQuery(pattern=re.compile(rb"^cdel:(?!all:)")))
     async def cb_del_cache_item(event):
         if not check_owner(event.sender_id):
             return await event.answer("⛔ Удалять видео из кэша может ТОЛЬКО владелец бота!", alert=True)

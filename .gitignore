@@ -12,6 +12,7 @@
 *cookies*.txt
 cookies.txt
 *.cookies
+channels.json
 
 # ── Базы данных и временные файлы SQLite ──
 *.db
