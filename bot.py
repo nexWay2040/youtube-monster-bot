@@ -987,11 +987,8 @@ BROWSER_COOKIE_CACHE_TTL = float(_env("BROWSER_COOKIE_CACHE_TTL_SECONDS", "900")
 _browser_cookie_lock = threading.Lock()
 
 def _materialize_browser_cookies() -> bool:
-    """Пишет куки из браузера в файл АТОМАРНО (сначала во временный файл,
-    потом os.replace) и под локом — если это дёргают параллельно два
-    скачивания сразу, второй поток дождётся первого вместо того, чтобы
-    писать в тот же файл одновременно и испортить его (именно это раньше
-    вызывало 'does not look like a Netscape format cookies file')."""
+    """Пишет куки из браузера в файл атомарно и под локом.
+    Ловит PermissionError когда браузер запущен и держит лок."""
     with _browser_cookie_lock:
         tmp_path = _BROWSER_COOKIE_CACHE_PATH + ".tmp"
         try:
@@ -1002,26 +999,31 @@ def _materialize_browser_cookies() -> bool:
                 "cookiesfrombrowser": (BROWSER_COOKIES,),
             }) as ydl:
                 ydl.cookiejar.save(tmp_path, ignore_discard=True, ignore_expires=True)
-            os.replace(tmp_path, _BROWSER_COOKIE_CACHE_PATH)  # атомарно на одной ФС
+            os.replace(tmp_path, _BROWSER_COOKIE_CACHE_PATH)
             return True
+        except PermissionError:
+            term_log(
+                "⚠️ COOKIES",
+                f"Браузер '{BROWSER_COOKIES}' удерживает лок — закрой его или используй cookies.txt",
+                Colors.YELLOW
+            )
         except Exception as e:
-            term_log("⚠️ COOKIES", f"Не удалось извлечь куки из браузера '{BROWSER_COOKIES}': {e}", Colors.YELLOW)
+            term_log("⚠️ COOKIES", f"Не удалось извлечь куки из '{BROWSER_COOKIES}': {e}", Colors.YELLOW)
+        finally:
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
             except Exception:
                 pass
-            return False
+        return False
 
 def get_cookie_opts() -> dict:
     """
-    Раньше экспортированный cookies.txt всегда имел приоритет над куками
-    из браузера — даже если он протух (например, после смены IP/VPN).
-    Из-за этого приходилось руками пересохранять файл после каждой смены сервера.
-    Теперь: если файл с куками старше COOKIE_MAX_AGE_HOURS, он игнорируется
-    и бот сам берёт свежие куки прямо из браузера (если BROWSER_COOKIES задан) —
-    так они всегда актуальны, без ручного экспорта.
+    Умный выбор cookies с защитой от PermissionError при запущенном браузере.
+    НИКОГДА не передаёт cookiesfrombrowser напрямую в скачивание —
+    если браузер держит лок, это роняет загрузку.
     """
+    # 1. Проверяем файлы cookies.txt
     candidates = []
     if COOKIE_FILE:
         candidates.append(COOKIE_FILE)
@@ -1036,22 +1038,34 @@ def get_cookie_opts() -> dict:
             else:
                 term_log(
                     "⚠️ COOKIES",
-                    f"Файл {path} устарел ({age_hours:.1f}ч > {COOKIE_MAX_AGE_HOURS}ч) — "
-                    f"пробую куки из браузера, если заданы",
+                    f"Файл {path} устарел ({age_hours:.1f}ч > {COOKIE_MAX_AGE_HOURS}ч)",
                     Colors.YELLOW
                 )
 
+    # 2. Пробуем кэш из браузера
     if BROWSER_COOKIES and BROWSER_COOKIES.lower() not in ("none", "false", "0", ""):
-        needs_refresh = True
-        if os.path.exists(_BROWSER_COOKIE_CACHE_PATH):
-            age = time.time() - os.path.getmtime(_BROWSER_COOKIE_CACHE_PATH)
-            needs_refresh = age > BROWSER_COOKIE_CACHE_TTL
-        if needs_refresh:
-            _materialize_browser_cookies()
-        if os.path.exists(_BROWSER_COOKIE_CACHE_PATH):
+        cache_exists = os.path.exists(_BROWSER_COOKIE_CACHE_PATH)
+        cache_age = (time.time() - os.path.getmtime(_BROWSER_COOKIE_CACHE_PATH)) if cache_exists else float("inf")
+
+        # Кэш свежий — используем сразу
+        if cache_exists and cache_age <= BROWSER_COOKIE_CACHE_TTL:
             return {"cookiefile": _BROWSER_COOKIE_CACHE_PATH}
-        # если материализация не удалась хотя бы раз — fallback на прямое чтение браузера
-        return {"cookiesfrombrowser": (BROWSER_COOKIES,)}
+
+        # Пробуем обновить
+        if _materialize_browser_cookies():
+            return {"cookiefile": _BROWSER_COOKIE_CACHE_PATH}
+
+        # Обновить не удалось (браузер запущен?) — берём старый кэш если не протух
+        if cache_exists and cache_age <= COOKIE_MAX_AGE_HOURS:
+            term_log(
+                "⚠️ COOKIES",
+                f"Браузер недоступен, использую кэш ({cache_age/60:.0f} мин)",
+                Colors.YELLOW
+            )
+            return {"cookiefile": _BROWSER_COOKIE_CACHE_PATH}
+
+        # Кэш протух или не существует
+        term_log("⚠️ COOKIES", "Куки недоступны — работаю без авторизации", Colors.YELLOW)
 
     return {}
 
@@ -1064,18 +1078,20 @@ def ytdlp_opts() -> dict:
         "fragment_retries": 10,
         "concurrent_fragment_downloads": 4,
         "sleep_interval_requests": 1,
+
+        # Ключевое: клиенты, отдающие DASH 1080p/720p
+        # tv — YouTube TV app, отдаёт полный DASH без PO Token
+        # mweb — мобильный web, отдаёт DASH
+        # web — запасной
+        "extractor_args": {
+            "youtube": ["player_client=tv,mweb,web"]
+        },
     }
-    # Раньше здесь был жёстко прописан "extractor_args": {"youtube": ["player_client=web,ios,mweb"]}.
-    # Это ПЕРЕБИВАЛО умный автовыбор клиента в yt-dlp: если переданы валидные
-    # cookies залогиненного аккаунта, yt-dlp сам выбирает клиенты вроде
-    # web_creator/tv_downgraded, которые отдают полный список форматов
-    # (честные 1080p/720p60). А клиенты ios/mweb часто требуют po_token для
-    # топовых форматов и без него отдают урезанный список (потолок нередко
-    # 360-480p) — из-за этого "1080p" по факту скачивался в SD.
-    # Просто не переопределяем extractor_args — пусть yt-dlp решает сам.
+
     ffmpeg_path = shutil.which("ffmpeg")
     if ffmpeg_path:
         opts["ffmpeg_location"] = os.path.dirname(ffmpeg_path)
+
     if YTDLP_USE_PROXY:
         opts["proxy"] = f"socks5://{YTDLP_PROXY_HOST}:{YTDLP_PROXY_PORT}"
 
@@ -1145,11 +1161,12 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
         for a in audio_priority:
             candidates.append(f"bestvideo[height<={q}]+{a}")
             candidates.append(f"bestvideo[width<={max_w}]+{a}")
-        candidates.append(f"best[language^=ru][height<={q}]")
-        candidates.append(f"best[format_note*=Russian][height<={q}]")
+        candidates.append(f"best[language^=ru][height<={q}][vcodec!=none]")
+        candidates.append(f"best[format_note*=Russian][height<={q}][vcodec!=none]")
         candidates.append(f"bestvideo[height<={q}]+bestaudio")
-        candidates.append("best")
+        candidates.append("best[vcodec!=none]")
         opts["format"] = "/".join(candidates)
+
     elif lang == "en":
         opts["format_sort"] = ["hasaud", "lang:en", f"res:{q}", "codec:h264:vp9:av1", "fps", "size", "br"]
         opts["extractor_args"] = {
@@ -1163,31 +1180,39 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
         for a in audio_priority:
             candidates.append(f"bestvideo[height<={q}]+{a}")
             candidates.append(f"bestvideo[width<={max_w}]+{a}")
-        candidates.append(f"best[language^=en][height<={q}]")
-        candidates.append("best")
+        candidates.append(f"best[language^=en][height<={q}][vcodec!=none]")
+        candidates.append("best[vcodec!=none]")
         opts["format"] = "/".join(candidates)
 
-# 3. Для видео БЕЗ дубляжей (ОРИГИНАЛЬНЫЙ ГОЛОС АВТОРА, исключаем чужой автодубляж)
     else:
-        # Приоритет: 1) явно помеченная original, 2) без дубляжей, 3) чистый поток автора
-        audio_orig = (
-            "ba[format_note*=original]/"
-            "ba[format_note!*=dubbed][format_note!*=auto-dub]/"
-            "ba[format_id=251]/ba[format_id=140]/"
-            "ba"
-        )
+        # 🔑 ИСПРАВЛЕНИЕ: каждый кандидат — полностью самодостаточный.
+        # Больше НЕТ каскада audio_orig внутри строки с оператором +.
+        # Каждый вариант явно содержит и видео, и аудио.
         opts["format_sort"] = [f"res:{q}", "fps", "codec:h264:vp9:av1", "size", "br"]
         candidates = [
-            f"bestvideo[height<={q}]+{audio_orig}",
-            f"bestvideo[width<={max_w}]+{audio_orig}",
-            f"best[height<={q}][format_note*=original]",
-            f"best[height<={q}]",
-            f"bestvideo+{audio_orig}",
-            "best"
+            # Приоритет 1: видео + оригинальное аудио (явно помеченное)
+            f"bestvideo[height<={q}]+ba[format_note*=original]",
+            f"bestvideo[width<={max_w}]+ba[format_note*=original]",
+            # Приоритет 2: видео + аудио без дубляжа
+            f"bestvideo[height<={q}]+ba[format_note!*=dubbed][format_note!*=auto-dub]",
+            f"bestvideo[width<={max_w}]+ba[format_note!*=dubbed][format_note!*=auto-dub]",
+            # Приоритет 3: видео + стандартные аудио-форматы
+            f"bestvideo[height<={q}]+ba[format_id=251]",
+            f"bestvideo[height<={q}]+ba[format_id=140]",
+            # Приоритет 4: видео + лучшее аудио (общий)
+            f"bestvideo[height<={q}]+bestaudio",
+            f"bestvideo[width<={max_w}]+bestaudio",
+            # Приоритет 5: прогрессивный формат (видео+аудио в одном файле)
+            f"best[height<={q}][format_note*=original][vcodec!=none]",
+            f"best[height<={q}][vcodec!=none]",
+            # Приоритет 6: запасной без ограничения высоты
+            "bestvideo+bestaudio",
+            "best[vcodec!=none]"
         ]
         opts["format"] = "/".join(candidates)
 
     term_log("📥 YT-DLP", f"[{user_id}] Загрузка {video_id} ({q}p, аудио: {lang.upper()})...", Colors.CYAN)
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 
@@ -1197,6 +1222,20 @@ def download_video(url: str, quality: str, user_id: int, video_id: str, lang: st
         path = find_file(user_id, video_id)
     if not path:
         raise FileNotFoundError(f"Файл не найден: {user_id}_{video_id}{file_suffix}")
+
+    # 🔑 ЗАЩИТА: проверяем что скачалось РЕАЛЬНОЕ ВИДЕО, а не только аудио
+    info = probe(path)
+    if info["width"] == 0 or info["height"] == 0:
+        term_log("❌ YT-DLP", f"[{video_id}] Скачанный файл не содержит видеодорожку! Размер: {os.path.getsize(path)/1024/1024:.1f} МБ", Colors.RED)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        raise FileNotFoundError(
+            f"Файл не содержит видеодорожку (скачалось только аудио). "
+            f"Попробуйте другое качество или проверьте формат-селектор."
+        )
+
     return path
 
 def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", cancel_token=None) -> str:
@@ -1215,10 +1254,6 @@ def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", canc
         opts["format"] = "bestaudio[language^=en]/bestaudio[format_note*=English]/bestaudio/best"
     else:
         opts["format_sort"] = ["size", "br"]
-        # Каскадный выбор: ищем original, отсекаем dubbed/auto-dub, берем чистый поток,
-        # и в самом конце — best (смешанный формат), чтобы FFmpeg мог извлечь звук
-        # даже если у видео нет отдельной audio-only дорожки (частый случай для
-        # архивов трансляций/премьер, отдаваемых только через HLS).
         opts["format"] = (
             "ba[format_note*=original]/"
             "ba[format_note!*=dubbed][format_note!*=auto-dub]/"
@@ -1229,7 +1264,9 @@ def download_mp3(url: str, user_id: int, video_id: str, lang: str = "orig", canc
     opts["postprocessors"] = [
         {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
     ]
+
     term_log("🎵 YT-DLP", f"[{user_id}] Загрузка MP3: {video_id} ({lang.upper()})...", Colors.YELLOW)
+
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
 

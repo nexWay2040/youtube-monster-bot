@@ -1,21 +1,6 @@
 """
-channel_monitor.py — отдельный автономный бот-агент.
-
-НЕ взаимодействует с основным bot.py как с ботом (боты не могут писать
-другим ботам в Telegram) — просто переиспользует его функции скачивания
-(download_video, make_thumb, hashtag и т.д.) как обычный python-модуль,
-и общую базу bot.db.
-
-Вся автоматизация настраивается прямо в Telegram, в личке с этим ботом:
-  /menu           — главное меню (добавить канал, список, проверить сейчас)
-  /channels       — список каналов с кнопками управления
-  /addchannel     — добавить канал (спросит ссылку, имя, хештег)
-  /check          — проверить все каналы прямо сейчас
-  /check <key>    — проверить один канал
-  /forget <video_id> — "забыть" видео, чтобы бот выложил его повторно
-
-Запуск отдельным процессом:
-    python channel_monitor.py
+channel_monitor.py — автономный бот-агент с умным определением
+игр, жанров, обзоров и реальной жизни (без тяжёлых нейросетей).
 """
 
 import os
@@ -24,16 +9,15 @@ import sys
 import json
 import time
 import asyncio
+from typing import Optional
 
 import yt_dlp
 from telethon import TelegramClient, events, Button
+from telethon.tl.types import DocumentAttributeVideo
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Переиспользуем готовую логику скачивания/хештегов/логов из основного бота.
-# bot.py защищён `if __name__ == "__main__":`, поэтому импорт безопасен —
-# сам основной Telegram-бот при этом не запускается и не используется.
 import bot as core
 
 # ─────────────────────────────────────────────
@@ -43,31 +27,219 @@ MONITOR_BOT_TOKEN = os.getenv("MONITOR_BOT_TOKEN", "")
 TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "@blogeridownload")
 POLL_INTERVAL_MINUTES = float(os.getenv("MONITOR_POLL_INTERVAL_MINUTES", "15"))
 VIDEOS_PER_CHANNEL_CHECK = int(os.getenv("MONITOR_VIDEOS_PER_CHECK", "15"))
-MONITOR_VIDEO_QUALITY = os.getenv("MONITOR_VIDEO_QUALITY", "720")  # всегда 720p по умолчанию
+MONITOR_VIDEO_QUALITY = os.getenv("MONITOR_VIDEO_QUALITY", "720")
 
 MONITOR_BOOTSTRAP_LOOKBACK_HOURS = float(os.getenv("MONITOR_BOOTSTRAP_LOOKBACK_HOURS", "24"))
 MONITOR_BOOTSTRAP_FRESH_CHECK = int(os.getenv("MONITOR_BOOTSTRAP_FRESH_CHECK", "3"))
 
-# Разовая миграция из старого channels.json, если каналов в базе ещё нет
 LEGACY_CHANNELS_FILE = os.getenv("MONITOR_CHANNELS_FILE", "channels.json")
 
 if not MONITOR_BOT_TOKEN:
-    core.term_log("⛔ CRITICAL", "MONITOR_BOT_TOKEN не задан в .env — добавь токен второго бота от @BotFather", core.Colors.RED)
+    core.term_log("⛔ CRITICAL", "MONITOR_BOT_TOKEN не задан в .env", core.Colors.RED)
     sys.exit(1)
 
-# Многошаговые диалоги (добавление канала, смена хештега) — только с владельцем
-pending: dict = {}  # {user_id: {"action": str, "step": str, "data": dict}}
-
-# Замок, чтобы ручная /check и автопроверка по таймеру НИКОГДА не выполнялись
-# одновременно — раньше из-за этого один и тот же ролик мог начать качаться
-# двумя процессами параллельно (Windows блокировал .part-файл при попытке
-# переименования, плюс ломался файл-кэш cookies из браузера).
+pending: dict = {}
 check_lock = asyncio.Lock()
-# Дополнительная защита на уровне одного видео (на случай, если один video_id
-# всплывёт из двух разных каналов одновременно — маловероятно, но дёшево защититься)
 videos_in_progress: set = set()
 
+# ─────────────────────────────────────────────
+# БАЗА ИГР И ЖАНРОВ
+# ─────────────────────────────────────────────
+POPULAR_GAMES = [
+    (r'\b(minecraft|майнкрафт|майн)\b', '#Minecraft'),
+    (r'\b(roblox|роблокс)\b', '#Roblox'),
+    (r'\b(gta\s*5|гта\s*5|гта\s*v|gta\s*v|гта|gta)\b', '#GTA5'),
+    (r'\b(brawl\s*stars|бравл\s*старс|бравл)\b', '#BrawlStars'),
+    (r'\b(standoff\s*2|стандофф\s*2|стандофф|стандик)\b', '#Standoff2'),
+    (r'\b(counter[- ]*strike\s*2|cs\s*2|кс\s*2|csgo|cs:go|ксго)\b', '#CS2'),
+    (r'\b(dota\s*2|дота\s*2|дота|дотка)\b', '#Dota2'),
+    (r'\b(genshin\s*impact|геншин\s*импакт|геншин)\b', '#GenshinImpact'),
+    (r'\b(honkai[:\s]*star\s*rail|хонкай)\b', '#HonkaiStarRail'),
+    (r'\b(fnaf|фнаф|five\s*nights\s*at\s*freddy)\b', '#FNAF'),
+    (r'\b(pubg|пабг|пубг)\b', '#PUBG'),
+    (r'\b(fortnite|фортнайт)\b', '#Fortnite'),
+    (r'\b(rust|раст)\b', '#Rust'),
+    (r'\b(lethal\s*company|летал\s*компани)\b', '#LethalCompany'),
+    (r'\b(phasmophobia|фазмофобия|фазма)\b', '#Phasmophobia'),
+    (r'\b(poppy\s*playtime|поппи\s*плейтайм)\b', '#PoppyPlaytime'),
+    (r'\b(among\s*us|амонг\s*ас|амонгас)\b', '#AmongUs'),
+    (r'\b(geometry\s*dash|геометрия\s*даш|гд)\b', '#GeometryDash'),
+    (r'\b(terraria|террария)\b', '#Terraria'),
+    (r'\b(the\s*sims|симс)\b', '#TheSims'),
+    (r'\b(valorant|валорант)\b', '#Valorant'),
+    (r'\b(apex\s*legends|апекс)\b', '#ApexLegends'),
+    (r'\b(world\s*of\s*tanks|мир\s*танков|танки|wot)\b', '#МирТанков'),
+    (r'\b(tanks\s*blitz|blitz|блиц)\b', '#TanksBlitz'),
+    (r'\b(elden\s*ring|элден\s*ринг)\b', '#EldenRing'),
+    (r'\b(cyberpunk|киберпанк)\b', '#Cyberpunk2077'),
+    (r'\b(witcher|ведьмак)\b', '#Ведьмак3'),
+    (r'\b(stalker|сталкер)\b', '#Сталкер'),
+    (r'\b(subnautica|сабнатика)\b', '#Subnautica'),
+    (r'\b(fall\s*guys|фол\s*гайз)\b', '#FallGuys'),
+    (r'\b(cuphead|капхед)\b', '#Cuphead'),
+    (r'\b(undertale|андертейл)\b', '#Undertale'),
+    (r'\b(detroit[:\s]*become\s*human|детройт)\b', '#Detroit'),
+    (r'\b(clash\s*royale|клеш\s*рояль|клеш)\b', '#ClashRoyale'),
+    (r'\b(sims\s*4|симс\s*4)\b', '#Sims4'),
+    (r'\b(euro\s*truck|етс\s*2|ets\s*2)\b', '#ETS2'),
+    (r'\b(beamng|бимка)\b', '#BeamNG'),
+    (r'\b(garry\'?s\s*mod|гаррис\s*мод|гмод|gmod)\b', '#GarrysMod'),
+    (r'\b(dead\s*by\s*daylight|дбд|dbd)\b', '#DBD'),
+    (r'\b(atomic\s*heart|атомик\s*харт)\b', '#AtomicHeart'),
+    (r'\b(assassin\'?s\s*creed|ассасин)\b', '#AssassinsCreed'),
+    # ── Хорроры / инди / analog horror — часто встречаются у обзорщиков ужастиков ──
+    (r'\b(the\s*walten\s*files|волтен\s*файлс|файлы\s*волтена)\b', '#TheWaltenFiles'),
+    (r'\b(bendy\s*and\s*the\s*ink\s*machine|бенди)\b', '#Bendy'),
+    (r'\b(hello\s*neighbor|привет\s*сосед)\b', '#HelloNeighbor'),
+    (r'\b(baldi\'?s\s*basics|балди)\b', '#BaldisBasics'),
+    (r'\b(granny|бабка|гренни)\b', '#Granny'),
+    (r'\bdoors\b(?!\s*(?:closed|open|way))', '#DOORS'),
+    (r'\b(silent\s*hill|сайлент\s*хилл)\b', '#SilentHill'),
+    (r'\b(resident\s*evil|резидент\s*ивл|биохазард)\b', '#ResidentEvil'),
+    (r'\b(outlast|аутласт)\b', '#Outlast'),
+    (r'\b(amnesia|амнезия)\b', '#Amnesia'),
+    (r'\bscp\b', '#SCP'),
+    (r'\b(backrooms|бэкрумс|задворки)\b', '#Backrooms'),
+    (r'\b(little\s*nightmares|литл\s*найтмэрс)\b', '#LittleNightmares'),
+    (r'\b(content\s*warning)\b', '#ContentWarning'),
+    (r'\b(choo[- ]*choo\s*charles|чух[- ]*чух\s*чарльз)\b', '#ChooChooCharles'),
+    (r'\b(buckshot\s*roulette)\b', '#BuckshotRoulette'),
+    (r'\b(inscryption)\b', '#Inscryption'),
+    (r'\b(piggy)\b', '#Piggy'),
+    (r'\b(schedule\s*1|schedule\s*i)\b', '#ScheduleI'),
+    (r'\b(dayz|дэй\s*зэт)\b', '#DayZ'),
+    (r'\b(analog\s*horror|аналоговый\s*хоррор)\b', '#АналоговыйХоррор'),
+    (r'\b(martha\s*is\s*dead)\b', '#MarthaIsDead'),
+    (r'\b(fears\s*to\s*fathom)\b', '#FearsToFathom'),
+    (r'\b(propnight)\b', '#Propnight'),
+    (r'\b(five\s*nights\s*at\s*freddy\'?s?\s*security\s*breach|секьюрити\s*брич)\b', '#FNAFSecurityBreach'),
+]
 
+# Общий разбор — когда конкретную игру не узнали ни по одному паттерну выше
+# (например, малоизвестная инди-игра). Ищем характерные для геймерских
+# заголовков конструкции вида "Прохождение X", "Играю в X" и т.п. и берём
+# то, что похоже на название, вместо того чтобы просто сдаться без тега.
+GENERIC_GAME_PATTERNS = [
+    r'(?:прохождение|играю\s+в|играем\s+в|обзор\s+на\s+игру|review)[:\s]+([A-ZА-ЯЁ][\w\s:\'\-]{2,40}?)(?=\s*[-–—|#]|\s+часть\b|\s+\d|$)',
+    r'^([A-ZА-ЯЁ][\w\s:\'\-]{2,40}?)\s*[-–—]\s*(?:прохождение|часть|обзор|эпизод)\b',
+]
+
+def guess_generic_game(title: str) -> Optional[str]:
+    for pattern in GENERIC_GAME_PATTERNS:
+        m = re.search(pattern, title, re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip(" -:")
+            # отсекаем совсем короткие/мусорные совпадения
+            if 2 <= len(candidate) <= 30 and not candidate.isdigit():
+                return format_clean_hashtag(candidate)
+    return None
+
+def format_clean_hashtag(text: str) -> str:
+    clean = re.sub(r'[^\w\s]', '', text or '').strip()
+    words = clean.split()
+    if not words:
+        return ""
+    tag = "".join(w.capitalize() for w in words)
+    return "#" + tag
+
+def detect_video_tags(meta: dict, title: str) -> list:
+    """
+    Интеллектуальный анализатор: определяет формат ролика (обзор, теория,
+    челлендж, реальная жизнь) и название игры без использования нейросетей.
+    """
+    desc = (meta.get("description") or "").strip()
+    text = f"{title} {desc}".lower()
+    categories = [c.lower() for c in (meta.get("categories") or [])]
+    tags = [str(t).lower() for t in (meta.get("tags") or [])]
+
+    found_tags = []
+
+    # 1. Проверка на РЕАЛЬНУЮ ЖИЗНЬ / IRL (отсекаем путаницу с играми)
+    is_irl = bool(re.search(r'\b(в реальной жизни|в реале|в реальности|на самом деле|вживую|irl|live action)\b', text))
+
+    # 2. Определение формата ролика (Обзоры, Теории, Челленджи, Реакции)
+    if re.search(r'\b(обзор|мнение|распаковка|тест|review|разбор игры|первый взгляд|стоит ли)\b', title, re.IGNORECASE):
+        found_tags.append("🔍 #Обзор")
+    elif re.search(r'\b(теория|теории|сюжет|лор|вся правда|секреты|пасхалки|айсберг|история создания|концовка|объяснение)\b', title, re.IGNORECASE):
+        found_tags.append("🧠 #Теории")
+    elif re.search(r'\b(реакция|смотрит|реагирует|реакция на|react)\b', title, re.IGNORECASE):
+        found_tags.append("👀 #Реакция")
+    elif re.search(r'\b(челлендж|24 часа|100 дней|кто последний|эксперимент|challenge|я выжил|я провел|попробуй не)\b', title, re.IGNORECASE):
+        found_tags.append("🏆 #Челлендж")
+    elif is_irl:
+        found_tags.append("⛺ #ВРеале")
+
+    # Хорроры (специфика Винди / Куплинова)
+    if re.search(r'\b(инди хоррор|страшная игра|horror|жуткая игра|хоррор игра|пугалка)\b', title, re.IGNORECASE):
+        if "🔍 #Обзор" not in found_tags:
+            found_tags.append("👻 #Хоррор")
+
+    # 3. Определение названия Игры
+    game_tag = None
+
+    # А. Официальное поле YouTube Gaming (самое точное)
+    raw_game = meta.get("game")
+    if raw_game and isinstance(raw_game, str) and len(raw_game.strip()) > 1:
+        for pattern, gtag in POPULAR_GAMES:
+            if re.search(pattern, raw_game, re.IGNORECASE):
+                game_tag = gtag
+                break
+        if not game_tag:
+            game_tag = format_clean_hashtag(raw_game)
+
+    # Б. Поиск по строчке "Игра: Название" в описании
+    if not game_tag:
+        m_game = re.search(r'(?:игра|game)[:\s]+([^\n\r,]+)', desc, re.IGNORECASE)
+        if m_game:
+            found_name = m_game.group(1).strip()
+            for pattern, gtag in POPULAR_GAMES:
+                if re.search(pattern, found_name, re.IGNORECASE):
+                    game_tag = gtag
+                    break
+            if not game_tag and len(found_name) < 25:
+                game_tag = format_clean_hashtag(found_name)
+
+    # В. Поиск по популярным играм в названии
+    if not game_tag:
+        for pattern, gtag in POPULAR_GAMES:
+            if re.search(pattern, title, re.IGNORECASE):
+                game_tag = gtag
+                break
+
+    # Г. Поиск по тегам ролика
+    if not game_tag:
+        for t in tags:
+            for pattern, gtag in POPULAR_GAMES:
+                if re.search(pattern, t, re.IGNORECASE):
+                    game_tag = gtag
+                    break
+            if game_tag:
+                break
+
+    # Д. Игра не из списка (инди/малоизвестная) — пробуем вытащить название
+    # из характерных конструкций заголовка вместо того, чтобы сдаться.
+    # Применяем только если ролик похож на геймерский контент (категория
+    # Gaming или явные игровые слова в названии), чтобы не вешать левый
+    # хештег на видео не про игры.
+    if not game_tag:
+        looks_like_gaming = (
+            "gaming" in categories
+            or re.search(r'\b(прохождение|играю|играем|геймплей|gameplay|летсплей)\b', text)
+        )
+        if looks_like_gaming:
+            guess = guess_generic_game(title)
+            if guess:
+                game_tag = guess
+
+    # Если игра найдена — добавляем тег с джойстиком
+    if game_tag:
+        found_tags.append(f"🎮 {game_tag}")
+
+    return found_tags
+
+# ─────────────────────────────────────────────
+# УТИЛИТЫ И КАНАЛЫ
+# ─────────────────────────────────────────────
 def slugify(text: str) -> str:
     key = re.sub(r"\s+", "_", (text or "").strip().lower())
     key = re.sub(r"[^\w]", "", key, flags=re.UNICODE)
@@ -79,7 +251,6 @@ def slugify(text: str) -> str:
         key = f"{base}_{n}"
         n += 1
     return key
-
 
 def normalize_channel_url(raw: str) -> str:
     raw = (raw or "").strip()
@@ -93,14 +264,7 @@ def normalize_channel_url(raw: str) -> str:
         raw = raw.rstrip("/") + "/videos"
     return raw
 
-
 def migrate_legacy_channels_json():
-    """Докатывает каналы из channels.json в базу. Раньше проверялось 'если в
-    базе вообще есть строки — ничего не делать', но старые записи (ещё с
-    версии, где таблица хранила только channel_key+bootstrapped) имеют
-    url=NULL — из-за этого миграция ошибочно пропускалась. Теперь докатываем
-    любой канал, у которого нет url, и не трогаем уже полностью настроенные
-    (могли быть отредактированы вручную через /menu)."""
     if not os.path.exists(LEGACY_CHANNELS_FILE):
         return
     try:
@@ -115,7 +279,7 @@ def migrate_legacy_channels_json():
         key = entry.get("key") or slugify(entry.get("name", ""))
         existing = core.db.monitor_get_channel(key)
         if existing and existing.get("url"):
-            continue  # уже полностью настроен — не перезаписываем ручные правки
+            continue
         name = entry.get("name") or key
         url = entry.get("url", "")
         tag = core.hashtag(name)
@@ -125,18 +289,28 @@ def migrate_legacy_channels_json():
         imported += 1
 
     if imported:
-        core.term_log("📦 MONITOR", f"Докатил {imported} канал(ов) из {LEGACY_CHANNELS_FILE} в базу (был пустой/битый url)", core.Colors.CYAN)
+        core.term_log("📦 MONITOR", f"Докатил {imported} канал(ов) из {LEGACY_CHANNELS_FILE} в базу", core.Colors.CYAN)
 
+    try:
+        done_path = LEGACY_CHANNELS_FILE + ".imported"
+        if os.path.exists(done_path):
+            os.remove(done_path)
+        os.rename(LEGACY_CHANNELS_FILE, done_path)
+        core.term_log("📦 MONITOR", f"{LEGACY_CHANNELS_FILE} переименован в {done_path}", core.Colors.CYAN)
+    except Exception as e:
+        core.term_log("⚠️ MONITOR", f"Не удалось переименовать {LEGACY_CHANNELS_FILE}: {e}", core.Colors.YELLOW)
 
 # ─────────────────────────────────────────────
-# ПОЛУЧЕНИЕ СПИСКА ПОСЛЕДНИХ ВИДЕО КАНАЛА
+# ПОЛУЧЕНИЕ СПИСКА ВИДЕО
 # ─────────────────────────────────────────────
 def fetch_latest_videos(channel_url: str, limit: int) -> list:
-    """Быстрый список последних видео канала БЕЗ скачивания (extract_flat)."""
     opts = core.ytdlp_opts()
     opts["extract_flat"] = True
     opts["playlistend"] = limit
     opts["skip_download"] = True
+    ea = dict(opts.get("extractor_args") or {})
+    ea["youtubetab"] = ea.get("youtubetab", []) + ["skip=authcheck"]
+    opts["extractor_args"] = ea
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(channel_url, download=False)
@@ -159,11 +333,7 @@ def fetch_latest_videos(channel_url: str, limit: int) -> list:
         })
     return videos
 
-
 def get_video_timestamp(video_url: str):
-    """Точное время выхода ролика (unix timestamp). Дороже extract_flat,
-    поэтому используется только точечно — для 2-3 самых новых видео
-    при бутстрапе канала."""
     try:
         opts = core.ytdlp_opts()
         opts["skip_download"] = True
@@ -173,49 +343,74 @@ def get_video_timestamp(video_url: str):
     except Exception:
         return None
 
-
 # ─────────────────────────────────────────────
-# СКАЧИВАНИЕ + ПУБЛИКАЦИЯ ОДНОГО РОЛИКА
+# СКАЧИВАНИЕ + ПУБЛИКАЦИЯ
 # ─────────────────────────────────────────────
 async def post_video(client: TelegramClient, channel: dict, video: dict):
     vid = video["id"]
     url = video["url"]
     title = video["title"]
     name = channel["name"]
-    tag = channel.get("hashtag") or core.hashtag(name)
-    target = channel.get("target_channel") or TARGET_CHANNEL
+    
+    author_tag = channel.get("hashtag") or core.hashtag(name)
+    if not author_tag.startswith("#"):
+        author_tag = "#" + author_tag.lstrip("#")
+
+    raw_target = channel.get("target_channel") or TARGET_CHANNEL
+    targets = [t.strip() for t in raw_target.split(",") if t.strip()]
+    if not targets:
+        targets = [TARGET_CHANNEL]
 
     if vid in videos_in_progress:
-        core.term_log("⏭️ MONITOR", f"[{name}] {vid} уже качается в другом потоке — пропускаю дубль", core.Colors.YELLOW)
+        core.term_log("⏭️ MONITOR", f"[{name}] {vid} уже качается — пропуск дубля", core.Colors.YELLOW)
         return
     videos_in_progress.add(vid)
 
-    core.term_log("⬇️ MONITOR", f"[{name}] Новое видео: {title} ({vid}) → {target}", core.Colors.CYAN)
+    core.term_log("⬇️ MONITOR", f"[{name}] Новое видео: {title} ({vid}) → {', '.join(targets)}", core.Colors.CYAN)
 
     try:
-        # 0 = системный "владельческий" user_id для файлов монитора,
-        # чтобы не путать с обычными пользователями основного бота
+        # Извлекаем метаданные для умного распознавания игры и жанра
+        meta = {}
+        try:
+            opts_meta = core.ytdlp_opts()
+            opts_meta["skip_download"] = True
+            with yt_dlp.YoutubeDL(opts_meta) as ydl:
+                meta = await asyncio.to_thread(ydl.extract_info, url, download=False) or {}
+        except Exception:
+            pass
+
+        # Умный анализ тегов ролика (обзор, теория, хоррор, игра, челлендж)
+        tags_list = detect_video_tags(meta, title)
+        if tags_list:
+            core.term_log("🏷️ TAGS", f"[{name}] Найдено: {' '.join(tags_list)}", core.Colors.GREEN)
+
         path = await asyncio.to_thread(core.download_video, url, MONITOR_VIDEO_QUALITY, 0, vid, "orig", None)
         thumb = core.make_thumb(0, str(vid))
-
-        # Реальные width/height/duration из уже скачанного файла (ffprobe) —
-        # соответствуют фактическому разрешению (MONITOR_VIDEO_QUALITY),
-        # а не оригиналу на YouTube.
         info = core.probe(path)
+
+        if not info["width"]:
+            raise ValueError("скачанный файл не содержит видеодорожку (возможен блок/18+)")
+
         duration = info["duration"]
-        w = info["width"] or 1280
-        h = info["height"] or 720
+        w = info["width"]
+        h = info["height"]
 
-        # Хештег автора СНАЧАЛА, имя автора уже после него
-        caption = f"🎬 **{title}**\n\n{tag}\n👤 {name}"
+        # Формируем аккуратный пост
+        caption_lines = [f"🎬 **{title}**\n"]
+        if tags_list:
+            caption_lines.append(" ".join(tags_list))
+        caption_lines.append(f"👤 {author_tag}")
 
-        await client.send_file(
-            target,
-            path,
-            caption=caption,
-            thumb=thumb,
-            attributes=[core.DocumentAttributeVideo(duration=duration, w=w, h=h, supports_streaming=True)],
-        )
+        caption = "\n".join(caption_lines)
+
+        for target in targets:
+            await client.send_file(
+                target,
+                path,
+                caption=caption,
+                thumb=thumb,
+                attributes=[DocumentAttributeVideo(duration=duration, w=w, h=h, supports_streaming=True)],
+            )
 
         core.db.monitor_mark_posted(vid, name, title)
         core.term_log("✅ MONITOR", f"[{name}] Опубликовано: {title}", core.Colors.GREEN)
@@ -224,7 +419,6 @@ async def post_video(client: TelegramClient, channel: dict, video: dict):
         core.term_log("❌ MONITOR", f"[{name}] Ошибка публикации {vid}: {e}", core.Colors.RED)
     finally:
         videos_in_progress.discard(vid)
-        # подчищаем скачанные файлы за собой
         for fname in os.listdir(core.DOWNLOAD_DIR):
             if str(vid) in fname:
                 try:
@@ -232,9 +426,8 @@ async def post_video(client: TelegramClient, channel: dict, video: dict):
                 except Exception:
                     pass
 
-
 # ─────────────────────────────────────────────
-# ПРОВЕРКА ОДНОГО КАНАЛА
+# ПРОВЕРКА КАНАЛОВ
 # ─────────────────────────────────────────────
 async def check_channel(client: TelegramClient, channel: dict):
     key = channel["key"]
@@ -261,8 +454,7 @@ async def check_channel(client: TelegramClient, channel: dict):
         core.db.monitor_set_bootstrapped(key)
         core.term_log(
             "📌 MONITOR",
-            f"[{name}] Первый запуск — запомнено {len(videos)} видео, "
-            f"из них свежих к публикации: {len(fresh_to_post)}",
+            f"[{name}] Первый запуск — запомнено {len(videos)} видео, свежих: {len(fresh_to_post)}",
             core.Colors.CYAN
         )
         for v in reversed(fresh_to_post):
@@ -275,7 +467,6 @@ async def check_channel(client: TelegramClient, channel: dict):
         await post_video(client, channel, v)
         await asyncio.sleep(3)
 
-
 async def run_all_channels(client: TelegramClient):
     async with check_lock:
         for channel in core.db.monitor_list_channels():
@@ -284,28 +475,24 @@ async def run_all_channels(client: TelegramClient):
             except Exception as e:
                 core.term_log("❌ MONITOR", f"Ошибка проверки канала {channel.get('name')}: {e}", core.Colors.RED)
 
-
 async def poll_loop(client: TelegramClient):
     while True:
         await run_all_channels(client)
         await asyncio.sleep(POLL_INTERVAL_MINUTES * 60)
 
-
 # ─────────────────────────────────────────────
-# МЕНЮ И УПРАВЛЕНИЕ КАНАЛАМИ ИЗ TELEGRAM
+# УПРАВЛЕНИЕ ИЗ TELEGRAM
 # ─────────────────────────────────────────────
 def is_owner(event) -> bool:
     return event.sender_id == core.OWNER_ID
 
 def main_menu_buttons():
-    from telethon import Button
     return [
         [Button.inline("➕ Добавить канал", b"menu:add"), Button.inline("📺 Список каналов", b"menu:list")],
         [Button.inline("🔍 Проверить всё сейчас", b"menu:checkall")],
     ]
 
 def channel_list_buttons(channels: list):
-    from telethon import Button
     rows = []
     for ch in channels:
         rows.append([
@@ -315,10 +502,7 @@ def channel_list_buttons(channels: list):
     rows.append([Button.inline("➕ Добавить канал", b"menu:add"), Button.inline("🔙 Меню", b"menu:back")])
     return rows
 
-
 def register_handlers(client: TelegramClient):
-    from telethon import Button
-
     @client.on(events.NewMessage(pattern=r"^/(start|menu)(\s|$)"))
     async def cmd_menu(event):
         if not is_owner(event):
@@ -355,7 +539,7 @@ def register_handlers(client: TelegramClient):
         target_key = args[1].strip().lower() if len(args) > 1 else None
 
         if check_lock.locked():
-            await event.respond("⏳ Проверка уже идёт (автоматическая или запущенная ранее) — дождись её завершения, чтобы не было дублей.")
+            await event.respond("⏳ Проверка уже идёт — дождись завершения.")
             return
 
         if target_key:
@@ -379,24 +563,19 @@ def register_handlers(client: TelegramClient):
             return
         args = event.raw_text.split(maxsplit=1)
         if len(args) < 2:
-            await event.respond(
-                "Использование: `/forget VIDEO_ID` — video_id это то, что после v= в ссылке "
-                "на YouTube (например, для youtu.be/ux9UjdJuiVY это `ux9UjdJuiVY`).\n"
-                "После этого видео станет «новым» и появится при следующем /check."
-            )
+            await event.respond("Использование: `/forget VIDEO_ID` (например `ux9UjdJuiVY`).")
             return
         vid = args[1].strip()
         ok = core.db.monitor_forget(vid)
-        await event.respond(f"✅ Забыл `{vid}`, теперь он снова новый." if ok else f"⚠️ `{vid}` не найден в списке опубликованных/пропущенных.")
+        await event.respond(f"✅ Забыл `{vid}`, теперь он снова новый." if ok else f"⚠️ `{vid}` не найден.")
 
-    # ── Многошаговые диалоги (добавление канала / смена хештега) ──
     @client.on(events.NewMessage())
     async def on_any_message(event):
         if not is_owner(event):
             return
         text = event.raw_text.strip()
         if text.startswith("/"):
-            return  # команды обработаны выше
+            return
         state = pending.get(event.sender_id)
         if not state:
             return
@@ -424,7 +603,7 @@ def register_handlers(client: TelegramClient):
                 state["step"] = "target"
                 await event.respond(
                     f"В какой Telegram-канал публиковать? Пришли @username (или -100id), "
-                    f"или `-`, чтобы использовать канал по умолчанию (`{TARGET_CHANNEL}`):"
+                    f"можно несколько через запятую, или `-` для канала по умолчанию (`{TARGET_CHANNEL}`):"
                 )
             elif state["step"] == "target":
                 target = None if text == "-" else text
@@ -434,8 +613,7 @@ def register_handlers(client: TelegramClient):
                 await event.respond(
                     f"✅ Добавил канал **{data['name']}** (`{key}`)\nХештег: {data['hashtag']}\nURL: {data['url']}\n"
                     f"Публикует в: {target or TARGET_CHANNEL + ' (по умолчанию)'}\n\n"
-                    f"При следующей проверке бот запомнит текущие видео и начнёт следить за новыми "
-                    f"(кроме совсем свежих — их опубликует сразу).",
+                    f"При следующей проверке бот начнёт следить за новыми роликами.",
                     buttons=main_menu_buttons()
                 )
 
@@ -458,7 +636,6 @@ def register_handlers(client: TelegramClient):
                 buttons=main_menu_buttons()
             )
 
-    # ── Инлайн-кнопки ──
     @client.on(events.CallbackQuery())
     async def on_callback(event):
         if event.sender_id != core.OWNER_ID:
@@ -518,7 +695,7 @@ def register_handlers(client: TelegramClient):
             pending[event.sender_id] = {"action": "edit_target", "step": "wait", "data": {"key": key}}
             await event.respond(
                 f"Пришли @username или -100id Telegram-канала для `{key}`, "
-                f"или `-`, чтобы вернуть канал по умолчанию (`{TARGET_CHANNEL}`):"
+                f"или `-` для канала по умолчанию (`{TARGET_CHANNEL}`):"
             )
             await event.answer()
 
@@ -544,7 +721,6 @@ def register_handlers(client: TelegramClient):
             else:
                 await event.edit("Каналов больше нет.", buttons=[[Button.inline("➕ Добавить канал", b"menu:add")]])
 
-
 # ─────────────────────────────────────────────
 # СТАРТ
 # ─────────────────────────────────────────────
@@ -567,7 +743,6 @@ async def main():
     register_handlers(client)
     asyncio.create_task(poll_loop(client))
     await client.run_until_disconnected()
-
 
 if __name__ == "__main__":
     try:

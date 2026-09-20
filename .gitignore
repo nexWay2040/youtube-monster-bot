@@ -19,6 +19,7 @@ channels.json
 *.db-journal
 *.db-wal
 *.db-shm
+channels.json.imported
 
 # ── Логи (включая ротацию RotatingFileHandler: bot.log.1, bot.log.2...) ──
 *.log
