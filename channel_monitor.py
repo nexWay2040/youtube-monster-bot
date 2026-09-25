@@ -1,6 +1,6 @@
 """
 channel_monitor.py — автономный бот-агент с умным определением
-игр, жанров, обзоров и реальной жизни (без тяжёлых нейросетей).
+игр (Куплинов, скобки, теги, Винди), жанров и защитой от старых видео.
 """
 
 import os
@@ -9,6 +9,7 @@ import sys
 import json
 import time
 import asyncio
+from datetime import datetime
 from typing import Optional
 
 import yt_dlp
@@ -28,6 +29,9 @@ TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "@blogeridownload")
 POLL_INTERVAL_MINUTES = float(os.getenv("MONITOR_POLL_INTERVAL_MINUTES", "15"))
 VIDEOS_PER_CHANNEL_CHECK = int(os.getenv("MONITOR_VIDEOS_PER_CHECK", "15"))
 MONITOR_VIDEO_QUALITY = os.getenv("MONITOR_VIDEO_QUALITY", "720")
+
+# Жёсткий фильтр: видео старше этого количества часов НЕ публикуются как новые!
+MONITOR_MAX_AGE_HOURS = float(os.getenv("MONITOR_MAX_AGE_HOURS", "48"))
 
 MONITOR_BOOTSTRAP_LOOKBACK_HOURS = float(os.getenv("MONITOR_BOOTSTRAP_LOOKBACK_HOURS", "24"))
 MONITOR_BOOTSTRAP_FRESH_CHECK = int(os.getenv("MONITOR_BOOTSTRAP_FRESH_CHECK", "3"))
@@ -87,19 +91,20 @@ POPULAR_GAMES = [
     (r'\b(dead\s*by\s*daylight|дбд|dbd)\b', '#DBD'),
     (r'\b(atomic\s*heart|атомик\s*харт)\b', '#AtomicHeart'),
     (r'\b(assassin\'?s\s*creed|ассасин)\b', '#AssassinsCreed'),
-    # ── Хорроры / инди / analog horror — часто встречаются у обзорщиков ужастиков ──
+    # Хорроры (специфика Винди / Куплинова)
     (r'\b(the\s*walten\s*files|волтен\s*файлс|файлы\s*волтена)\b', '#TheWaltenFiles'),
+    (r'\b(mandela\s*catalogue|каталог\s*манделы)\b', '#MandelaCatalogue'),
     (r'\b(bendy\s*and\s*the\s*ink\s*machine|бенди)\b', '#Bendy'),
     (r'\b(hello\s*neighbor|привет\s*сосед)\b', '#HelloNeighbor'),
     (r'\b(baldi\'?s\s*basics|балди)\b', '#BaldisBasics'),
-    (r'\b(granny|бабка|гренни)\b', '#Granny'),
+    (r'\b(granny|бабка\s*гренни|гренни)\b', '#Granny'),
     (r'\bdoors\b(?!\s*(?:closed|open|way))', '#DOORS'),
     (r'\b(silent\s*hill|сайлент\s*хилл)\b', '#SilentHill'),
     (r'\b(resident\s*evil|резидент\s*ивл|биохазард)\b', '#ResidentEvil'),
     (r'\b(outlast|аутласт)\b', '#Outlast'),
     (r'\b(amnesia|амнезия)\b', '#Amnesia'),
     (r'\bscp\b', '#SCP'),
-    (r'\b(backrooms|бэкрумс|задворки)\b', '#Backrooms'),
+    (r'\b(backrooms|бэкрумс|закулисье)\b', '#Backrooms'),
     (r'\b(little\s*nightmares|литл\s*найтмэрс)\b', '#LittleNightmares'),
     (r'\b(content\s*warning)\b', '#ContentWarning'),
     (r'\b(choo[- ]*choo\s*charles|чух[- ]*чух\s*чарльз)\b', '#ChooChooCharles'),
@@ -109,32 +114,18 @@ POPULAR_GAMES = [
     (r'\b(schedule\s*1|schedule\s*i)\b', '#ScheduleI'),
     (r'\b(dayz|дэй\s*зэт)\b', '#DayZ'),
     (r'\b(analog\s*horror|аналоговый\s*хоррор)\b', '#АналоговыйХоррор'),
-    (r'\b(martha\s*is\s*dead)\b', '#MarthaIsDead'),
     (r'\b(fears\s*to\s*fathom)\b', '#FearsToFathom'),
-    (r'\b(propnight)\b', '#Propnight'),
-    (r'\b(five\s*nights\s*at\s*freddy\'?s?\s*security\s*breach|секьюрити\s*брич)\b', '#FNAFSecurityBreach'),
 ]
 
-# Общий разбор — когда конкретную игру не узнали ни по одному паттерну выше
-# (например, малоизвестная инди-игра). Ищем характерные для геймерских
-# заголовков конструкции вида "Прохождение X", "Играю в X" и т.п. и берём
-# то, что похоже на название, вместо того чтобы просто сдаться без тега.
-GENERIC_GAME_PATTERNS = [
-    r'(?:прохождение|играю\s+в|играем\s+в|обзор\s+на\s+игру|review)[:\s]+([A-ZА-ЯЁ][\w\s:\'\-]{2,40}?)(?=\s*[-–—|#]|\s+часть\b|\s+\d|$)',
-    r'^([A-ZА-ЯЁ][\w\s:\'\-]{2,40}?)\s*[-–—]\s*(?:прохождение|часть|обзор|эпизод)\b',
-]
-
-def guess_generic_game(title: str) -> Optional[str]:
-    for pattern in GENERIC_GAME_PATTERNS:
-        m = re.search(pattern, title, re.IGNORECASE)
-        if m:
-            candidate = m.group(1).strip(" -:")
-            # отсекаем совсем короткие/мусорные совпадения
-            if 2 <= len(candidate) <= 30 and not candidate.isdigit():
-                return format_clean_hashtag(candidate)
-    return None
+# Слова-исключения внутри скобок, которые точно НЕ являются названием игры
+IGNORE_IN_PARENTHESES = {
+    '18+', 'финал', 'конец', 'часть', 'серия', 'сезон', 'обзор', 'стрим',
+    'нарезка', 'shorts', 'reupload', '4k', '60fps', 'hd', 'full hd',
+    'шок', 'жесть', 'эксперимент', 'voice', 'дубляж', 'реакция', 'react'
+}
 
 def format_clean_hashtag(text: str) -> str:
+    """Форматирует красивый CamelCase хештег без спецсимволов"""
     clean = re.sub(r'[^\w\s]', '', text or '').strip()
     words = clean.split()
     if not words:
@@ -142,10 +133,44 @@ def format_clean_hashtag(text: str) -> str:
     tag = "".join(w.capitalize() for w in words)
     return "#" + tag
 
+def extract_game_from_title_patterns(title: str) -> Optional[str]:
+    """
+    Вытаскивает игру из заголовка:
+    1. После стрелки Куплинова: "НАЗВАНИЕ ► [ТЕГ] Игра #1"
+    2. Из скобок блогеров: "Спасаем пса ( Like a dog )"
+    """
+    # 1. Шаблон Куплинова: после стрелочки ► или ▶
+    m_arrow = re.search(r'[►▶]\s*(?:\[[^\]]+\]\s*)?([A-Za-zА-Яа-я0-9\s:\'\-–]+)', title)
+    if m_arrow:
+        candidate = m_arrow.group(1).strip()
+        # Отрезаем номер серии/части: "#1", "Часть 2", "Финал", "- Эпизод"
+        cleaned = re.sub(r'(\s*#\d+|\s+часть\s*\d*|\s+финал|\s+серия\s*\d*|\s+конец).*$', '', candidate, flags=re.IGNORECASE).strip()
+        if len(cleaned) >= 2 and not cleaned.isdigit():
+            # Если это игра из нашего списка — отдаем каноничный тег
+            for pattern, gtag in POPULAR_GAMES:
+                if re.search(pattern, cleaned, re.IGNORECASE):
+                    return gtag
+            return format_clean_hashtag(cleaned)
+
+    # 2. Шаблон скобок: ( Game Name ) или [ Game Name ]
+    for match in re.finditer(r'[\(\[]\s*([A-Za-z0-9\s:\'\-\?!\.]{2,35})\s*[\)\]]', title):
+        cand = match.group(1).strip()
+        cand_lower = cand.lower()
+        if any(ign in cand_lower for ign in IGNORE_IN_PARENTHESES):
+            continue
+        cleaned = re.sub(r'[\?!]+$', '', cand).strip()
+        if len(cleaned) >= 2 and not cleaned.isdigit():
+            for pattern, gtag in POPULAR_GAMES:
+                if re.search(pattern, cleaned, re.IGNORECASE):
+                    return gtag
+            return format_clean_hashtag(cleaned)
+
+    return None
+
 def detect_video_tags(meta: dict, title: str) -> list:
     """
-    Интеллектуальный анализатор: определяет формат ролика (обзор, теория,
-    челлендж, реальная жизнь) и название игры без использования нейросетей.
+    Определяет жанр (обзор, теория, хоррор) и название игры.
+    Работает для Куплинова, Винди, Дюшеса и любых геймеров.
     """
     desc = (meta.get("description") or "").strip()
     text = f"{title} {desc}".lower()
@@ -154,10 +179,10 @@ def detect_video_tags(meta: dict, title: str) -> list:
 
     found_tags = []
 
-    # 1. Проверка на РЕАЛЬНУЮ ЖИЗНЬ / IRL (отсекаем путаницу с играми)
+    # 1. Проверка на реальную жизнь (IRL)
     is_irl = bool(re.search(r'\b(в реальной жизни|в реале|в реальности|на самом деле|вживую|irl|live action)\b', text))
 
-    # 2. Определение формата ролика (Обзоры, Теории, Челленджи, Реакции)
+    # 2. Формат ролика
     if re.search(r'\b(обзор|мнение|распаковка|тест|review|разбор игры|первый взгляд|стоит ли)\b', title, re.IGNORECASE):
         found_tags.append("🔍 #Обзор")
     elif re.search(r'\b(теория|теории|сюжет|лор|вся правда|секреты|пасхалки|айсберг|история создания|концовка|объяснение)\b', title, re.IGNORECASE):
@@ -169,25 +194,38 @@ def detect_video_tags(meta: dict, title: str) -> list:
     elif is_irl:
         found_tags.append("⛺ #ВРеале")
 
-    # Хорроры (специфика Винди / Куплинова)
-    if re.search(r'\b(инди хоррор|страшная игра|horror|жуткая игра|хоррор игра|пугалка)\b', title, re.IGNORECASE):
+    # Хорроры (Куплинов, Винди)
+    if re.search(r'\b(инди хоррор|страшная игра|horror|herror|жуткая игра|хоррор игра|пугалка)\b', title, re.IGNORECASE):
         if "🔍 #Обзор" not in found_tags:
             found_tags.append("👻 #Хоррор")
 
-    # 3. Определение названия Игры
+    # 3. Определение названия игры
     game_tag = None
 
-    # А. Официальное поле YouTube Gaming (самое точное)
-    raw_game = meta.get("game")
-    if raw_game and isinstance(raw_game, str) and len(raw_game.strip()) > 1:
+    # Шаг А: Поиск по шаблонам Куплинова (►) и скобкам ( Like a dog )
+    game_from_pattern = extract_game_from_title_patterns(title)
+    if game_from_pattern:
+        game_tag = game_from_pattern
+
+    # Шаг Б: Поиск по базе популярных игр (для Винди и общих названий)
+    if not game_tag:
         for pattern, gtag in POPULAR_GAMES:
-            if re.search(pattern, raw_game, re.IGNORECASE):
+            if re.search(pattern, title, re.IGNORECASE):
                 game_tag = gtag
                 break
-        if not game_tag:
-            game_tag = format_clean_hashtag(raw_game)
 
-    # Б. Поиск по строчке "Игра: Название" в описании
+    # Шаг В: Официальное поле YouTube Gaming (если заполнено)
+    if not game_tag:
+        raw_game = meta.get("game")
+        if raw_game and isinstance(raw_game, str) and len(raw_game.strip()) > 1:
+            for pattern, gtag in POPULAR_GAMES:
+                if re.search(pattern, raw_game, re.IGNORECASE):
+                    game_tag = gtag
+                    break
+            if not game_tag:
+                game_tag = format_clean_hashtag(raw_game)
+
+    # Шаг Г: Поиск строки "Игра: Название" в описании
     if not game_tag:
         m_game = re.search(r'(?:игра|game)[:\s]+([^\n\r,]+)', desc, re.IGNORECASE)
         if m_game:
@@ -199,14 +237,7 @@ def detect_video_tags(meta: dict, title: str) -> list:
             if not game_tag and len(found_name) < 25:
                 game_tag = format_clean_hashtag(found_name)
 
-    # В. Поиск по популярным играм в названии
-    if not game_tag:
-        for pattern, gtag in POPULAR_GAMES:
-            if re.search(pattern, title, re.IGNORECASE):
-                game_tag = gtag
-                break
-
-    # Г. Поиск по тегам ролика
+    # Шаг Д: Поиск по тегам ролика
     if not game_tag:
         for t in tags:
             for pattern, gtag in POPULAR_GAMES:
@@ -216,29 +247,34 @@ def detect_video_tags(meta: dict, title: str) -> list:
             if game_tag:
                 break
 
-    # Д. Игра не из списка (инди/малоизвестная) — пробуем вытащить название
-    # из характерных конструкций заголовка вместо того, чтобы сдаться.
-    # Применяем только если ролик похож на геймерский контент (категория
-    # Gaming или явные игровые слова в названии), чтобы не вешать левый
-    # хештег на видео не про игры.
-    if not game_tag:
-        looks_like_gaming = (
-            "gaming" in categories
-            or re.search(r'\b(прохождение|играю|играем|геймплей|gameplay|летсплей)\b', text)
-        )
-        if looks_like_gaming:
-            guess = guess_generic_game(title)
-            if guess:
-                game_tag = guess
-
-    # Если игра найдена — добавляем тег с джойстиком
     if game_tag:
         found_tags.append(f"🎮 {game_tag}")
 
     return found_tags
 
+def get_video_age_hours(meta: dict) -> Optional[float]:
+    """Определяет возраст ролика в часах по timestamp или дате upload_date"""
+    # 1. Точный unix timestamp
+    ts = meta.get("timestamp") or meta.get("release_timestamp")
+    if ts:
+        try:
+            return (time.time() - float(ts)) / 3600.0
+        except Exception:
+            pass
+
+    # 2. Строковая дата "YYYYMMDD"
+    ud = meta.get("upload_date")
+    if ud and len(ud) == 8 and ud.isdigit():
+        try:
+            dt = datetime.strptime(ud, "%Y%m%d")
+            return (time.time() - dt.timestamp()) / 3600.0
+        except Exception:
+            pass
+
+    return None
+
 # ─────────────────────────────────────────────
-# УТИЛИТЫ И КАНАЛЫ
+# УТИЛИТЫ КАНАЛОВ
 # ─────────────────────────────────────────────
 def slugify(text: str) -> str:
     key = re.sub(r"\s+", "_", (text or "").strip().lower())
@@ -333,16 +369,6 @@ def fetch_latest_videos(channel_url: str, limit: int) -> list:
         })
     return videos
 
-def get_video_timestamp(video_url: str):
-    try:
-        opts = core.ytdlp_opts()
-        opts["skip_download"] = True
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(video_url, download=False)
-        return info.get("timestamp") or info.get("release_timestamp")
-    except Exception:
-        return None
-
 # ─────────────────────────────────────────────
 # СКАЧИВАНИЕ + ПУБЛИКАЦИЯ
 # ─────────────────────────────────────────────
@@ -352,6 +378,7 @@ async def post_video(client: TelegramClient, channel: dict, video: dict):
     title = video["title"]
     name = channel["name"]
     
+    # Хештег автора всегда начинается с #
     author_tag = channel.get("hashtag") or core.hashtag(name)
     if not author_tag.startswith("#"):
         author_tag = "#" + author_tag.lstrip("#")
@@ -366,10 +393,8 @@ async def post_video(client: TelegramClient, channel: dict, video: dict):
         return
     videos_in_progress.add(vid)
 
-    core.term_log("⬇️ MONITOR", f"[{name}] Новое видео: {title} ({vid}) → {', '.join(targets)}", core.Colors.CYAN)
-
     try:
-        # Извлекаем метаданные для умного распознавания игры и жанра
+        # Извлекаем метаданные для проверки даты и игры
         meta = {}
         try:
             opts_meta = core.ytdlp_opts()
@@ -379,7 +404,22 @@ async def post_video(client: TelegramClient, channel: dict, video: dict):
         except Exception:
             pass
 
-        # Умный анализ тегов ролика (обзор, теория, хоррор, игра, челлендж)
+        # ── ЖЁСТКИЙ ФИЛЬТР ВОЗРАСТА: отсекаем старые ролики (7 месяцев и т.д.) ──
+        age_hours = get_video_age_hours(meta)
+        if age_hours is not None and age_hours > MONITOR_MAX_AGE_HOURS:
+            days = age_hours / 24.0
+            core.term_log(
+                "⏭️ MONITOR",
+                f"[{name}] Пропуск старого видео ({days:.0f} дн. назад > {MONITOR_MAX_AGE_HOURS:.0f}ч): {title} ({vid})",
+                core.Colors.YELLOW
+            )
+            # Запоминаем в базе, чтобы больше никогда не пытаться его проверять
+            core.db.monitor_mark_posted(vid, name, title)
+            return
+
+        core.term_log("⬇️ MONITOR", f"[{name}] Новое видео: {title} ({vid}) → {', '.join(targets)}", core.Colors.CYAN)
+
+        # Анализ тегов (игра, обзор, хоррор, теория)
         tags_list = detect_video_tags(meta, title)
         if tags_list:
             core.term_log("🏷️ TAGS", f"[{name}] Найдено: {' '.join(tags_list)}", core.Colors.GREEN)
@@ -395,7 +435,11 @@ async def post_video(client: TelegramClient, channel: dict, video: dict):
         w = info["width"]
         h = info["height"]
 
-        # Формируем аккуратный пост
+        # Формируем пост:
+        # 🎬 **Название ролика**
+        #
+        # 🎮 #Игра 👻 #Хоррор (если есть)
+        # 👤 #Автор
         caption_lines = [f"🎬 **{title}**\n"]
         if tags_list:
             caption_lines.append(" ".join(tags_list))
@@ -438,23 +482,35 @@ async def check_channel(client: TelegramClient, channel: dict):
     if not videos:
         return
 
+    # Первый запуск для канала: запоминаем существующие ролики,
+    # публикуем только самые свежие (< MONITOR_BOOTSTRAP_LOOKBACK_HOURS)
     if not channel.get("bootstrapped"):
-        now = time.time()
         fresh_to_post = []
         for i, v in enumerate(videos):
             is_fresh = False
             if i < MONITOR_BOOTSTRAP_FRESH_CHECK:
-                ts = await asyncio.to_thread(get_video_timestamp, v["url"])
-                if ts and (now - ts) <= MONITOR_BOOTSTRAP_LOOKBACK_HOURS * 3600:
+                # Получаем метаданные ролика
+                meta = {}
+                try:
+                    opts_meta = core.ytdlp_opts()
+                    opts_meta["skip_download"] = True
+                    with yt_dlp.YoutubeDL(opts_meta) as ydl:
+                        meta = await asyncio.to_thread(ydl.extract_info, v["url"], download=False) or {}
+                except Exception:
+                    pass
+                age_h = get_video_age_hours(meta)
+                if age_h is not None and age_h <= MONITOR_BOOTSTRAP_LOOKBACK_HOURS:
                     is_fresh = True
+
             if is_fresh:
                 fresh_to_post.append(v)
             else:
                 core.db.monitor_mark_posted(v["id"], name, v["title"])
+
         core.db.monitor_set_bootstrapped(key)
         core.term_log(
             "📌 MONITOR",
-            f"[{name}] Первый запуск — запомнено {len(videos)} видео, свежих: {len(fresh_to_post)}",
+            f"[{name}] Первый запуск — запомнено {len(videos)} видео, свежих к публикации: {len(fresh_to_post)}",
             core.Colors.CYAN
         )
         for v in reversed(fresh_to_post):
@@ -462,6 +518,7 @@ async def check_channel(client: TelegramClient, channel: dict):
             await asyncio.sleep(3)
         return
 
+    # Обычная проверка: отбираем ролики, которых нет в базе
     new_videos = [v for v in videos if not core.db.monitor_is_posted(v["id"])]
     for v in reversed(new_videos):
         await post_video(client, channel, v)
