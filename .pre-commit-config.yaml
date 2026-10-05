@@ -1,0 +1,11 @@
+# Локальные проверки перед каждым коммитом:
+#   pip install pre-commit && pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: syntax-check
+        name: Python syntax check (py_compile)
+        language: system
+        entry: python -m py_compile
+        types: [python]
+        pass_filenames: true

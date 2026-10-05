@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import json
+import functools
 import html
 import math
 import hmac
@@ -36,7 +37,7 @@ except ImportError:
 from telethon import TelegramClient, events, functions, types, utils
 from telethon.tl.custom import Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
-from dotenv import load_dotenv, set_key
+from dotenv import load_dotenv
 
 if os.name == 'nt':
     os.system('')
@@ -165,23 +166,61 @@ def cleanup_download_dir_on_boot():
 
 from logging.handlers import RotatingFileHandler
 
+# Файл bot.log пишется только на диск (с ротацией): в консоли и так цветной
+# term_log/cprint, дублировать каждый лог в stdout — шум и двойная запись.
+_file_handlers = []
+try:
+    _file_handlers.append(
+        RotatingFileHandler("bot.log", maxBytes=5 * 1024 * 1024,
+                            backupCount=5, encoding="utf-8")
+    )
+except OSError as e:  # нет прав / read-only ФС — не роняем старт бота
+    print(f"⚠️  Не удалось создать файл лога bot.log: {e}")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        RotatingFileHandler("bot.log", maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"),
-    ],
+    handlers=_file_handlers or None,
 )
+# yt-dlp печатает предупреждения через logging — приглушаем шум библиотек
+for _noisy in ("yt_dlp", "telethon.errors", "asyncio"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 log = logging.getLogger("bot")
 
 def update_env(key: str, value: str):
+    """Атомарно обновляет KEY=VALUE в .env.
+
+    set_key() перезаписывает файл целиком: если процесс умрёт посреди записи,
+    можно потерять весь .env. Пишем во временный файл рядом и подменяем через
+    os.replace() — это атомарная операция на уровне ОС.
+    """
+    os.environ[key] = str(value)  # текущий процесс видит новое значение сразу
+    tmp = f"{ENV_FILE}.tmp.{os.getpid()}"
     try:
-        set_key(ENV_FILE, key, str(value))
+        lines = []
+        if os.path.exists(ENV_FILE):
+            with open(ENV_FILE, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        replaced = False
+        pat = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        for idx, ln in enumerate(lines):
+            if pat.match(ln) and not ln.lstrip().startswith("#"):
+                lines[idx] = f"{key}={value}"
+                replaced = True
+                break
+        if not replaced:
+            lines.append(f"{key}={value}")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, ENV_FILE)
     except Exception as e:
         term_log("⚠️ ENV", f"Ошибка сохранения {key} в {ENV_FILE}: {e}", Colors.YELLOW)
-    os.environ[key] = str(value)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
 
 def save_premium_list():
     all_premium = [str(uid) for uid in sorted(PREMIUM_USERS)]
@@ -205,9 +244,32 @@ def get_telethon_proxy():
 # ─────────────────────────────────────────────
 # БАЗА ДАННЫХ (SQLite3)
 # ─────────────────────────────────────────────
+def _sync(fn):
+    """Сериализует доступ к SQLite из разных потоков (asyncio.to_thread).
+
+    Одно соединение sqlite3 с check_same_thread=False без замка при
+    параллельных загрузках даёт «database is locked» / InterfaceError.
+    """
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self.lock:
+            return fn(self, *args, **kwargs)
+    return wrapper
+
+
 class DB:
     def __init__(self, path="bot.db"):
+        # check_same_thread=False осознанно: соединение шарится между
+        # worker-потоками asyncio.to_thread, все запросы сериализуются
+        # замком self.lock (см. декоратор _sync над методами ниже).
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        # WAL: читатели не блокируют писателя — меньше «database is locked».
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.Error:
+            pass
+        self.lock = threading.RLock()
         self.c = self.conn.cursor()
         self.c.executescript("""
             CREATE TABLE IF NOT EXISTS users (
@@ -265,10 +327,12 @@ class DB:
                     print(f"[DB MIGRATE WARNING] monitor_channels.{col}: {e}")
         self._sync_admins()
 
+    @_sync
     def monitor_is_posted(self, video_id: str) -> bool:
         self.c.execute("SELECT 1 FROM monitor_videos WHERE video_id=?", (video_id,))
         return self.c.fetchone() is not None
 
+    @_sync
     def monitor_mark_posted(self, video_id: str, channel_name: str, title: str):
         self.c.execute(
             "INSERT OR IGNORE INTO monitor_videos (video_id, channel_name, title) VALUES (?,?,?)",
@@ -276,16 +340,19 @@ class DB:
         )
         self.conn.commit()
 
+    @_sync
     def monitor_forget(self, video_id: str) -> bool:
         self.c.execute("DELETE FROM monitor_videos WHERE video_id=?", (video_id,))
         self.conn.commit()
         return self.c.rowcount > 0
 
+    @_sync
     def monitor_is_bootstrapped(self, channel_key: str) -> bool:
         self.c.execute("SELECT bootstrapped FROM monitor_channels WHERE channel_key=?", (channel_key,))
         row = self.c.fetchone()
         return bool(row and row[0])
 
+    @_sync
     def monitor_set_bootstrapped(self, channel_key: str):
         self.c.execute(
             "INSERT INTO monitor_channels (channel_key, bootstrapped) VALUES (?,1) "
@@ -294,6 +361,7 @@ class DB:
         )
         self.conn.commit()
 
+    @_sync
     def monitor_add_channel(self, key: str, name: str, url: str, hashtag: str, target_channel: str = None):
         self.c.execute(
             "INSERT INTO monitor_channels (channel_key, name, url, hashtag, target_channel, active, bootstrapped, added_at) "
@@ -304,21 +372,25 @@ class DB:
         )
         self.conn.commit()
 
+    @_sync
     def monitor_remove_channel(self, key: str) -> bool:
         self.c.execute("DELETE FROM monitor_channels WHERE channel_key=?", (key,))
         self.conn.commit()
         return self.c.rowcount > 0
 
+    @_sync
     def monitor_set_hashtag(self, key: str, hashtag: str) -> bool:
         self.c.execute("UPDATE monitor_channels SET hashtag=? WHERE channel_key=?", (hashtag, key))
         self.conn.commit()
         return self.c.rowcount > 0
 
+    @_sync
     def monitor_set_target(self, key: str, target_channel: str) -> bool:
         self.c.execute("UPDATE monitor_channels SET target_channel=? WHERE channel_key=?", (target_channel, key))
         self.conn.commit()
         return self.c.rowcount > 0
 
+    @_sync
     def monitor_list_channels(self, active_only: bool = True) -> list:
         q = "SELECT channel_key, name, url, hashtag, bootstrapped, active, target_channel FROM monitor_channels"
         if active_only:
@@ -331,6 +403,7 @@ class DB:
             for r in self.c.fetchall()
         ]
 
+    @_sync
     def monitor_get_channel(self, key: str) -> Optional[dict]:
         self.c.execute(
             "SELECT channel_key, name, url, hashtag, bootstrapped, active, target_channel FROM monitor_channels WHERE channel_key=?",
@@ -342,6 +415,7 @@ class DB:
         return {"key": r[0], "name": r[1], "url": r[2], "hashtag": r[3], "bootstrapped": bool(r[4]),
                 "active": bool(r[5]), "target_channel": r[6]}
 
+    @_sync
     def _sync_admins(self):
         try:
             self.c.execute("SELECT user_id FROM admins")
@@ -350,6 +424,7 @@ class DB:
         except Exception:
             pass
 
+    @_sync
     def register_user(self, uid: int, uname: str = ""):
         self.c.execute(
             "INSERT INTO users (user_id, username) VALUES (?,?) "
@@ -357,11 +432,13 @@ class DB:
             "WHERE excluded.username != ''", (uid, uname or ""))
         self.conn.commit()
 
+    @_sync
     def is_banned(self, uid: int) -> bool:
         self.c.execute("SELECT is_banned FROM users WHERE user_id=?", (uid,))
         row = self.c.fetchone()
         return bool(row[0]) if row else False
 
+    @_sync
     def set_ban(self, uid: int, banned: bool) -> bool:
         self.c.execute(
             "INSERT INTO users (user_id, is_banned) VALUES (?,?) "
@@ -370,17 +447,20 @@ class DB:
         self.conn.commit()
         return True
 
+    @_sync
     def add_stats(self, uid: int, mb: float):
         self.c.execute(
             "UPDATE users SET total_videos=total_videos+1, total_mb=total_mb+? WHERE user_id=?",
             (mb, uid))
         self.conn.commit()
 
+    @_sync
     def get_user_stats(self, uid: int) -> Tuple[int, float]:
         self.c.execute("SELECT total_videos, total_mb FROM users WHERE user_id=?", (uid,))
         row = self.c.fetchone()
         return (row[0] or 0, row[1] or 0.0) if row else (0, 0.0)
 
+    @_sync
     def get_cache(self, vid: str, quality: str, lang: str = "orig") -> Optional[Tuple[str, str]]:
         """Строгий поиск в кэше без смешивания языков"""
         q_key = f"{quality}_{lang}"
@@ -390,6 +470,7 @@ class DB:
             return row[0], row[1] or ""
         return None
 
+    @_sync
     def set_cache(self, vid: str, quality: str, lang: str, file_id: str, title: str = ""):
         """Строгое сохранение с префиксом озвучки (orig, ya, ru, en)"""
         q_key = f"{quality}_{lang}"
@@ -401,6 +482,7 @@ class DB:
             (vid, q_key, file_id, clean_title))
         self.conn.commit()
 
+    @_sync
     def update_title_if_needed(self, vid: str, title: str):
         if not title or title.lower() in ("none", "без названия", "unknown"):
             return
@@ -409,6 +491,7 @@ class DB:
             (title, vid))
         self.conn.commit()
 
+    @_sync
     def del_cache(self, vid: str, quality_key: str = "") -> int:
         deleted_rows = 0
         if quality_key:
@@ -423,12 +506,14 @@ class DB:
         self.conn.commit()
         return deleted_rows
 
+    @_sync
     def clear_all_cache(self) -> int:
         self.c.execute("DELETE FROM cache")
         count = self.c.rowcount
         self.conn.commit()
         return count
 
+    @_sync
     def search_cache(self, query: str, limit: int = 15) -> list:
         self.c.execute(
             "SELECT video_id, quality, title, created_at, file_id FROM cache "
@@ -436,6 +521,7 @@ class DB:
             (f"%{query}%", f"%{query}%", limit))
         return self.c.fetchall()
 
+    @_sync
     def get_cache_page(self, page: int = 1, page_size: int = 5) -> Tuple[list, int]:
         self.c.execute("SELECT COUNT(*) FROM cache")
         total = self.c.fetchone()[0]
@@ -446,36 +532,43 @@ class DB:
         items = self.c.fetchall()
         return items, total
 
+    @_sync
     def all_users(self) -> List[int]:
         self.c.execute("SELECT user_id FROM users WHERE is_banned=0")
         return [r[0] for r in self.c.fetchall()]
 
+    @_sync
     def get_users_list(self, limit=50) -> list:
         self.c.execute(
             "SELECT user_id, username, is_banned, total_videos FROM users "
             "ORDER BY joined_at DESC LIMIT ?", (limit,))
         return self.c.fetchall()
 
+    @_sync
     def find_user_by_name(self, uname: str) -> Optional[int]:
         clean = uname.strip().lower().lstrip("@")
         self.c.execute("SELECT user_id FROM users WHERE LOWER(username)=?", (clean,))
         row = self.c.fetchone()
         return row[0] if row else None
 
+    @_sync
     def add_admin(self, uid: int, uname: str = ""):
         self.c.execute("INSERT OR REPLACE INTO admins (user_id, username) VALUES (?,?)", (uid, uname or ""))
         self.conn.commit()
         ADMIN_IDS.add(uid)
 
+    @_sync
     def del_admin(self, uid: int):
         self.c.execute("DELETE FROM admins WHERE user_id=?", (uid,))
         self.conn.commit()
         ADMIN_IDS.discard(uid)
 
+    @_sync
     def is_admin_in_db(self, uid: int) -> bool:
         self.c.execute("SELECT user_id FROM admins WHERE user_id=?", (uid,))
         return bool(self.c.fetchone())
 
+    @_sync
     def stats(self) -> dict:
         self.c.execute("SELECT COUNT(*), SUM(total_videos), SUM(total_mb) FROM users")
         u, v, mb = self.c.fetchone()
@@ -2793,8 +2886,14 @@ def check_cookies_broken() -> Optional[str]:
 async def maintenance_loop():
     """Раз в COOKIE_CHECK_INTERVAL_HOURS часов проверяет куки и версию yt-dlp,
     шлёт владельцу сообщение в Telegram, если что-то сломалось/устарело."""
-    cookie_interval = float(_env("COOKIE_CHECK_INTERVAL_HOURS", "6"))
-    ytdlp_interval = float(_env("YTDLP_CHECK_INTERVAL_HOURS", "24"))
+    try:
+        cookie_interval = max(0.25, float(_env("COOKIE_CHECK_INTERVAL_HOURS", "6")))
+    except ValueError:
+        cookie_interval = 6.0
+    try:
+        ytdlp_interval = max(0.25, float(_env("YTDLP_CHECK_INTERVAL_HOURS", "24")))
+    except ValueError:
+        ytdlp_interval = 24.0
     last_ytdlp_check = 0.0
 
     while True:
@@ -2832,6 +2931,17 @@ async def start_bot():
     removed, freed_mb = cleanup_download_dir_on_boot()
     if removed:
         term_log("🧹 CLEANUP", f"Удалено {removed} огрызков файлов из {DOWNLOAD_DIR} (освобождено {freed_mb:.1f} МБ)", Colors.CYAN)
+
+    if not BOT_TOKEN:
+        term_log("⛔ CRITICAL",
+                 "BOT_TOKEN не задан! Получите токен у @BotFather и пропишите его в .env",
+                 Colors.RED)
+        sys.exit(1)
+    if not API_ID or not API_HASH:
+        term_log("⛔ CRITICAL",
+                 "API_ID / API_HASH не заданы! Получите их на https://my.telegram.org и пропишите в .env",
+                 Colors.RED)
+        sys.exit(1)
 
     term_log("🚀 INIT", "Инициализация клиента Telegram Bot...", Colors.CYAN)
     bot = TelegramClient("bot_session", API_ID, API_HASH, proxy=proxy)
