@@ -42,8 +42,8 @@
 
 ```bash
 # 1. Клонируем и ставим зависимости
-git clone https://github.com/nexWay2040/youtube-monster-bot.git
-cd youtube-monster-bot
+git clone https://github.com/nexWay2040/youtube-download-bot.git
+cd youtube-download-bot
 pip install -r requirements.txt
 
 # 2. Создаём конфиг и заполняем свои ключи
